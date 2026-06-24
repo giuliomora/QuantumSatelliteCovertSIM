@@ -1,4 +1,0 @@
-# File di salvataggio automatico di MATLAB
-*.asv
-*.mat
-*.slprj/
