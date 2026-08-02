@@ -58,7 +58,7 @@ delta_v = 1;                % m/s
 delta_p = m_Al * delta_v;   % Differenza di momento lineare
 
 % 3. Il Messaggio Segreto e la Fisica
-bit_tx = 0;                 % Il bit che Alice vuole inviare
+bit_tx = 1;                 % Il bit che Alice vuole inviare
 if bit_tx == 0
     phi = 0;
 else
@@ -124,30 +124,48 @@ S_filtrato = S_centrato - movmean(S_centrato, 500);
 % De-Chirping: Bob compensa solo la curvatura spaziale (c_chirp) dell'Alluminio
 Chiave_FrFT = exp(-1i * (c_chirp * (omega.^2)));
 
-% 4. ESTRAZIONE DEL PICCO (FFT)
+% 4. ESTRAZIONE DEL PICCO (FFT) per Bob dopo de-chirp
 Segnale_Ruotato = S_filtrato .* Chiave_FrFT;
 Y_Bob = fftshift(fft(Segnale_Ruotato));
 Picco_Bob = real(Y_Bob);
 
+% =========================================================================
+% FASE 4b: INTERCETTATORE EVE (NESSUNA CONOSCENZA DELLA FrFT O DEL CHIRP)
+% =========================================================================
+disp('--- FASE 4b: Intercettatore Eve (FFT classica) ---');
+
+% Eve prende il medesimo segnale ricevuto dal canale (senza tracking né de-chirp)
+% Applica una classica FFT come "misuratore di energia"
+Y_Eve = fftshift(fft(S_ricevuto));
+Spec_Eve = abs(Y_Eve);
+Spec_Eve_dB = 20*log10(Spec_Eve + eps); % in dB per visualizzazione
 
 % =========================================================================
 % FASE 5: VISUALIZZAZIONE DEL REPORT E GRAFICI
 % =========================================================================
 disp('--- FASE 5: Generazione Grafici ---');
 
-figure('Name', 'Link Satellitare Quantum Covert', 'Color', 'w', 'Position', [100, 100, 900, 600]);
+figure('Name', 'Link Satellitare Quantum Covert', 'Color', 'w', 'Position', [100, 100, 900, 800]);
 
-% Grafico 1: Quello che si vede nel canale spaziale (Eve)
-subplot(2, 1, 1);
+% Grafico 1: Quello che si vede nel canale spaziale (Eve osserva il segnale nel dominio base)
+subplot(3, 1, 1);
 plot(omega, S_ricevuto, 'Color', [0.6 0.6 0.6]);
 title('1. Canale Intercettato (SNR = -41 dB, Shift Doppler 7.6 km/s)');
 xlabel('\omega (Banda Base)'); ylabel('Ampiezza'); grid on;
 
-% Grafico 2: Quello che estrae il telescopio di Bob
+% Grafico 2: Spettro di Eve (FFT classica) - Eve non compensa né dechirpa
+subplot(3, 1, 2);
+u_e = linspace(-1, 1, N_campioni);
+plot(u_e, Spec_Eve_dB, 'k');
+title('2. Spettro di Eve (FFT classica) - Nessuna conoscenza FrFT/Chirp');
+xlabel('u (Dominio delle frequenze)'); ylabel('Ampiezza (dB)'); grid on;
+xlim([-0.2 0.2]); % zoom per confronto
+
+% Grafico 3: Quello che estrae il telescopio di Bob (FrFT-like de-chirp + FFT)
 u = linspace(-1, 1, N_campioni);
-subplot(2, 1, 2);
-plot(u, Picco_Bob, 'b', 'LineWidth', 1.5);
-title(['2. Decodifica FrFT (Bit Trasmesso: ', num2str(bit_tx), ')']);
+subplot(3, 1, 3);
+plot(u, Picco_Bob, 'b', 'LineWidth', 1.2);
+title(['3. Decodifica Bob (De-Chirp + FFT) - Bit Trasmesso: ', num2str(bit_tx)]);
 xlabel('u (Dominio Frazionario)'); ylabel('Ampiezza del Picco'); grid on;
 xlim([-0.2 0.2]); % Zoom per apprezzare la pulizia del picco
 
