@@ -1,189 +1,150 @@
 % =========================================================================
-% SIMULAZIONE LINK INTERSATELLITARE QUANTUM COVERT (LEO-LEO ISL)
+% SIMULAZIONE AVANZATA LINK INTERSATELLITARE QUANTUM COVERT (LEO-LEO ISL)
+% Modello: Ione 27Al+ | Quantum Time Dilation & Chirp De-dispersion (FrFT)
 % =========================================================================
 clc; clear; close all;
-
-% =========================================================================
-% STEP 1 & STEP 2: CINEMATICA ISL E LINK BUDGET OTTICO SPAZIALE
+%% ========================================================================
+% FASE 1: CINEMATICA ISL E LINK BUDGET OTTICO SPAZIALE
 % =========================================================================
 disp('--- FASE 1: Cinematica LEO-LEO e Link Budget Intersatellitare ---');
-
-% Costanti Fisiche
+% Costanti Fisiche Fondamentali
 c = 3e8;                    % Velocità della luce (m/s)
-lambda_0 = 267e-9;          % Lunghezza d'onda transizione Al+ (267 nm)
+lambda_0 = 267e-9;          % Transizione UV ione 27Al+ (267 nm)
 h_planck = 6.626e-34;       % Costante di Planck (J*s)
-E_fotone = h_planck * (c / lambda_0); % Energia di un singolo fotone (J)
-
-% Geometria e Cinematica Intersatellitare (ISL LEO-LEO)
+E_fotone = h_planck * (c / lambda_0); % Energia singolo fotone (~7.44e-19 J)
+% Parametri Orbitali Intersatellitari (Configurazione Walker-Star)
 v_orbita = 7.6e3;           % Velocità orbitale singolo satellite (7.6 km/s)
-Distanza_ISL = 300e3;       % Distanza di collegamento intersatellitare (300 km)
-
-% Angolo di incidenza tra i piani orbitali (Incrocio equatore/piani adiacenti)
-theta_deg = 60;             % Angolo scelto: 60° (Configurazione tipica Walker-Star)
+Distanza_ISL = 300e3;       % Link distance ISL (300 km)
+theta_deg = 60;             % Angolo di incrocio tra piani orbitali
 theta_rad = deg2rad(theta_deg);
-
-% Calcolo Vettoriale della Velocità Relativa lungo la linea di vista (LOS)
-v_rel = 2 * v_orbita * sin(theta_rad / 2); % ~7.6 km/s a 60°
-
-% Parametri Ottici dei Telescopi
-D_tx = 0.20;                % Diametro telescopio Alice (200 mm)
-D_rx = 0.30;                % Diametro telescopio Bob (300 mm)
-P_tx_laser = 100e-3;        % Potenza laser di trasmissione (100 mW)
-
-% Guadagni delle Antenne Ottiche
+% Velocità Relativa LOS
+v_rel = 2 * v_orbita * sin(theta_rad / 2); % ~7.60 km/s a 60°
+% Parametri Ottici dei Terminali ISL
+D_tx = 0.20;                % Telescopio Alice (200 mm)
+D_rx = 0.30;                % Telescopio Bob (300 mm)
+P_tx_laser = 100e-3;        % Potenza di pompaggio laser (100 mW)
+% Guadagni Ottici e Attenuazione Geometrica nello Spazio Libero
 G_tx = (pi * D_tx / lambda_0)^2;
 G_rx = (pi * D_rx / lambda_0)^2;
-
-% Free Space Path Loss (FSPL nel vuoto cosmico tra satelliti)
 FSPL = (4 * pi * Distanza_ISL / lambda_0)^2;
-
-% Potenza Ricevuta Teorica
 P_rx = P_tx_laser * (G_tx * G_rx) / FSPL;
-
-% Stampa dei parametri cinematici e ottici
-disp(['Distanza Link ISL: ', num2str(Distanza_ISL/1000), ' km']);
-disp(['Angolo tra Piani Orbitali (\theta): ', num2str(theta_deg), ' gradi']);
-disp(['Velocità Relativa v_rel: ', num2str(v_rel/1000, '%.2f'), ' km/s']);
-disp(['Potenza Ricevuta Teorica: ', num2str(P_rx, '%.3e'), ' Watt']);
-
+disp(['Link ISL Distance: ', num2str(Distanza_ISL/1000), ' km']);
+disp(['Velocità Relativa (v_rel): ', num2str(v_rel/1000, '%.2f'), ' km/s']);
+disp(['Potenza Ottica Ricevuta Teorica: ', num2str(P_rx, '%.3e'), ' W']);
+%% ========================================================================
+% FASE 2: FISICA ATOMICA E GENERAZIONE SEGNALE QUANTISTICO (ALICE)
 % =========================================================================
-% FASE 2: GENERAZIONE DEL SEGNALE QUANTISTICO (ALICE)
-% =========================================================================
-disp('--- FASE 2: Generazione Segnale Atomico (Alluminio-27) ---');
-
-% Vettori di Simulazione
-Fs = 50e6;                  % Frequenza di campionamento 50 MHz
-T_coh = 1e-3;               % Tempo di coerenza 1 ms
-N_campioni = Fs * T_coh;    % 50.000 campioni
-omega = linspace(-1, 1, N_campioni); % Asse frequenze normalizzato in banda base
-
-% Parametri Atomici
-amu = 1.6605e-27;           % Unità di massa atomica (kg)
-m_Al = 26.98 * amu;         % Massa Ione Alluminio-27
-
-% Differenza di momento (delta p)
-delta_v = 1;                % m/s
-delta_p = m_Al * delta_v;   % Differenza di momento lineare
-
-% Encoding del Bit Segreto (Fase Quantistica)
-bit_tx = 1;                 % Bit da trasmettere (0 oppure 1)
-if bit_tx == 0
-    phi = 0;
-else
-    phi = pi;
-end
-
-% Chirp Rate e Offset Quantistico
-c_chirp = 300 * pi;         % Tasso di dispersione quadratica (Chirp rate)
-offset_quantistico = 100 * pi; % Offset spettrale quantistico (p2 - p1)
-
-% Fase totale del segnale quantistico
+disp('--- FASE 2: Generazione Segnale Atomico e Modulazione di Fase ---');
+% Griglia di Simulazione in Banda Base Normalizzata
+N_campioni = 100000;         % Risoluzione ad alta densità
+omega = linspace(-1, 1, N_campioni);
+% Parametri Chirp Quantistico (Grochowski et al. 2021)
+c_chirp = 300 * pi;          % Chirp rate (rad/s^2 normalizzato)
+offset_quantistico = 100 * pi; % Termine di disassamento atomico
+% Fase Quantistica Totale (Dispersione Quadratica)
 Phi_totale = c_chirp * (omega.^2) + offset_quantistico * omega;
-
-% Generazione dell'interferenza atomica
-I_quant = 1e-5;             % Intensità quantistica nominale
-Interferenza_Alice = I_quant * cos(Phi_totale + phi);
-disp('Generazione completata. Alice ha preparato lo stato atomico covert.');
-
+% Generazione di entrambi i simboli (Bit 0 -> phi=0, Bit 1 -> phi=pi)
+I_quant = 1e-5;
+S_atomico_bit0 = I_quant * cos(Phi_totale + 0);    % Simbolo Bit 0
+S_atomico_bit1 = I_quant * cos(Phi_totale + pi);   % Simbolo Bit 1
+%% ========================================================================
+% FASE 3: TRASMISSIONE NEL CANALE ISL, DOPPLER E RUMORE (COVERAGE -41 dB)
 % =========================================================================
-% FASE 3: CANALE SPAZIALE ISL E MACRO-DOPPLER PROIETTATO (-41 dB)
-% =========================================================================
-disp('--- FASE 3: Simulazione Canale Spaziale Intersatellitare (-41 dB) ---');
-
-% 1. Calcolo dello Shift Doppler Cinematico Reale (Relativistico/Classico)
-shift_fisico_reale = v_rel / c; % Ratio adimensionale v_rel/c (~2.53e-5 per 7.6 km/s)
-
-% 2. Mappatura nello Spazio delle Frequenze Normalizzate del Simulatore
-% Per rendere lo shift visivamente apprezzabile sull'asse omega [-1, 1], 
-% lo Shift_Orbitale viene espresso come frazione della banda simulata.
-% In un simulatore Signal-Processing Level, rappresenta il disassamento del 40%.
-K_doppler_grafico = 1.578e4; % Fattore di scala del sistema di riferimento
-Shift_Orbitale = shift_fisico_reale * K_doppler_grafico; % Shift visibile (~0.40)
-
-% 3. Generazione del Profilo Classico (Fondo Termico Atomico spostato)
+disp('--- FASE 3: Iniezione nel Canale Spaziale ed Effetto Doppler ---');
+% Shift Doppler Cinematico Relativo
+shift_fisico_reale = v_rel / c; 
+K_doppler_grafico = 1.578e4; 
+Shift_Orbitale = shift_fisico_reale * K_doppler_grafico; % ~0.40
+% Profilo Termico/Gaussiano di Fondo (Doppler Broadening classico)
 sigma_doppler = 0.15; 
 S_classico = exp(-((omega - Shift_Orbitale).^2) / (2 * sigma_doppler^2));
-
-% 4. Traslazione Doppler del Segnale Quantistico
-% L'atomo è a bordo del satellite emettitore (Alice): il segnale quantistico 
-% subisce lo stesso identico spostamento Doppler cinematico del fondo classico.
-Phi_totale_shiftata = c_chirp * ((omega - Shift_Orbitale).^2) + ...
-                      offset_quantistico * (omega - Shift_Orbitale);
-Interferenza_Alice_Shiftata = I_quant * cos(Phi_totale_shiftata + phi);
-
-% 5. Impostazione della Covertness Energetica (-41 dB rispetto al rumore)
+% Traslazione del segnale quantistico (trasportato dalla sorgente mobile)
+Phi_shiftata = c_chirp * ((omega - Shift_Orbitale).^2) + ...
+               offset_quantistico * (omega - Shift_Orbitale);
+S_quant_tx0 = I_quant * cos(Phi_shiftata + 0);
+S_quant_tx1 = I_quant * cos(Phi_shiftata + pi);
+% Normalizzazione Potenza per Covertness Energetica (SNR = -41 dB)
+SNR_target_dB = -41;
 Potenza_Classica = mean(S_classico.^2);
-Potenza_Target = Potenza_Classica * (10^(-41/10)); % SNR impostato a -41 dB
-Potenza_Attuale = mean(Interferenza_Alice_Shiftata.^2);
-Fattore_di_Scala = sqrt(Potenza_Target / Potenza_Attuale);
-
-% Il segnale quantistico covert viene ridimensionato sotto il fondo
-Interferenza_Spaziale = Interferenza_Alice_Shiftata * Fattore_di_Scala;
-
-% 6. Rumore di Fondo Spaziale Aggiuntivo (Luce Solare / AWGN)
+Potenza_Target = Potenza_Classica * 10^(SNR_target_dB / 10);
+Fattore_Scala = sqrt(Potenza_Target / mean(S_quant_tx0.^2));
+S_quant_tx0 = S_quant_tx0 * Fattore_Scala;
+S_quant_tx1 = S_quant_tx1 * Fattore_Scala;
+% Rumore di canale (Fondo cosmico / Solare / Shot Noise)
+rng(42); % Riproducibilità del rumore AWGN
 Rumore_Spaziale = 0.02 * randn(1, N_campioni);
-
-% 7. SEGNALE TOTALE PRESENTE NEL CANALE ISL (Intercettabile da Eve e Bob)
-S_ricevuto = S_classico + Interferenza_Spaziale + Rumore_Spaziale;
-
+% Segnali totali ricevuti nel canale per Bit 0 e Bit 1
+S_rx_bit0 = S_classico + S_quant_tx0 + Rumore_Spaziale;
+S_rx_bit1 = S_classico + S_quant_tx1 + Rumore_Spaziale;
+%% ========================================================================
+% FASE 4: RICEVITORE DI BOB (Tracking, Clutter Rejection, FrFT De-Chirp)
 % =========================================================================
-% STEP 5: IL RICEVITORE DI BOB (Tracking Intersatellitare & De-Chirping)
-% =========================================================================
-disp('--- FASE 4: Tracking Orbitale e Demodulazione di Bob ---');
-
-% 1. Tracking Satellitare: Bob compensa il Macro-Doppler cinematico LEO-LEO
-S_centrato = interp1(omega, S_ricevuto, omega + Shift_Orbitale, 'linear', 0);
-
-% 2. Clutter Rejection: Rimozione della baseline termica continua
-S_filtrato = S_centrato - movmean(S_centrato, 500);
-
-% 3. De-Chirping (FrFT-like): Compensazione della fase quadratica dell'Alluminio
+disp('--- FASE 4: Demodulazione Coerente di Bob ---');
+% 1. Doppler Tracking (Spostamento del centro banda tramite effemeridi)
+S_centrato_bit0 = interp1(omega, S_rx_bit0, omega + Shift_Orbitale, 'linear', 0);
+S_centrato_bit1 = interp1(omega, S_rx_bit1, omega + Shift_Orbitale, 'linear', 0);
+% 2. Clutter Rejection (Rimozione inviluppo lento classico)
+S_clean_bit0 = S_centrato_bit0 - movmean(S_centrato_bit0, 1000);
+S_clean_bit1 = S_centrato_bit1 - movmean(S_centrato_bit1, 1000);
+% 3. De-Chirping Operatore FrFT: exp(-i * c_chirp * omega^2)
 Chiave_FrFT = exp(-1i * (c_chirp * (omega.^2)));
-
-% 4. Estrazione del Picco Spettrale (FFT)
-Segnale_Ruotato = S_filtrato .* Chiave_FrFT;
-Y_Bob = fftshift(fft(Segnale_Ruotato));
-Picco_Bob = real(Y_Bob);
-
+% 4. Compressione Spettrale (Fourier Frazionaria)
+Y_Bob_bit0 = fftshift(fft(S_clean_bit0 .* Chiave_FrFT));
+Y_Bob_bit1 = fftshift(fft(S_clean_bit1 .* Chiave_FrFT));
+Picco_Bob_bit0 = real(Y_Bob_bit0);
+Picco_Bob_bit1 = real(Y_Bob_bit1);
+% Metriche di decisione (Processing Gain)
+[val_max_0, idx_max_0] = max(Picco_Bob_bit0);
+[val_min_1, idx_min_1] = min(Picco_Bob_bit1);
+rumore_rms = std(Picco_Bob_bit0([1:10000, end-10000:end]));
+SNR_post_Bob_dB = 20*log10(abs(val_max_0) / rumore_rms);
+disp(['Processing Gain: Segnale recuperato a SNR = +', num2str(SNR_post_Bob_dB, '%.2f'), ' dB']);
+%% ========================================================================
+% FASE 5: INTERCETTORE EVE (FFT Classica e Analisi Statistica di Ensemble)
 % =========================================================================
-% FASE 4b: INTERCETTATORE EVE (FFT CLASSICA)
+disp('--- FASE 5: Analisi Intercettatore Eve ---');
+% 1. Eve su singolo frame (spettro FFT standard non de-chirpato)
+Y_Eve_single = fftshift(fft(S_rx_bit0));
+Spec_Eve_single_dB = 20*log10(abs(Y_Eve_single) + eps);
+% 2. Eve media statistica su molti simboli (Covertness Quantistica)
+% Con bit equiprobabili (p=0.5), i termini quantistici opposti si elidono esattamente:
+S_Eve_ensemble = 0.5 * S_rx_bit0 + 0.5 * S_rx_bit1;
+Y_Eve_ensemble = fftshift(fft(S_Eve_ensemble));
+Spec_Eve_ensemble_dB = 20*log10(abs(Y_Eve_ensemble) + eps);
+%% ========================================================================
+% FASE 6: REPORT GRAFICO AD ALTA DEFINIZIONE PER LA TESI
 % =========================================================================
-disp('--- FASE 4b: Intercettatore Eve (FFT Classica senza De-Chirp) ---');
-
-% Eve intercetta il segnale ISL nel canale ma applica una FFT standard
-Y_Eve = fftshift(fft(S_ricevuto));
-Spec_Eve = abs(Y_Eve);
-Spec_Eve_dB = 20*log10(Spec_Eve + eps);
-
-% =========================================================================
-% FASE 5: REPORT GRAFICO DEL LINK INTERSATELLITARE
-% =========================================================================
-disp('--- FASE 5: Generazione Grafici ---');
-
-figure('Name', 'Link Intersatellitare (ISL LEO-LEO) Quantum Covert', ...
-       'Color', 'w', 'Position', [100, 100, 900, 800]);
-
-% Grafico 1: Canale Intersatellitare Intercettato
-subplot(3, 1, 1);
-plot(omega, S_ricevuto, 'Color', [0.6 0.6 0.6]);
-title(['1. Canale ISL LEO-LEO (SNR = -41 dB, \theta = ', num2str(theta_deg), ...
-       '°, v_{rel} = ', num2str(v_rel/1000, '%.2f'), ' km/s)']);
-xlabel('\omega (Banda Base)'); ylabel('Ampiezza'); grid on;
-
-% Grafico 2: Spettro dell'Intercettatore Eve
-subplot(3, 1, 2);
-u_e = linspace(-1, 1, N_campioni);
-plot(u_e, Spec_Eve_dB, 'k');
-title('2. Spettro di Eve (FFT classica) - Segnale Indistinguibile dal Rumore');
-xlabel('u (Dominio delle Frequenze)'); ylabel('Ampiezza (dB)'); grid on;
-xlim([-0.2 0.2]);
-
-% Grafico 3: Decodifica del Ricevitore Bob
-u = linspace(-1, 1, N_campioni);
-subplot(3, 1, 3);
-plot(u, Picco_Bob, 'b', 'LineWidth', 1.2);
-title(['3. Decodifica Bob (De-Chirp + FFT) - Bit Decodificato: ', num2str(bit_tx)]);
-xlabel('u (Dominio Frazionario)'); ylabel('Ampiezza del Picco'); grid on;
-xlim([-0.2 0.2]);
-
-disp('SIMULAZIONE INTERSATELLITARE COMPLETATA CON SUCCESSO!');
+disp('--- FASE 6: Generazione Grafici ---');
+figure('Name', 'Analisi Completa Quantum Covert ISL', 'Color', 'w', 'Position', [80, 50, 1000, 850]);
+u_axis = linspace(-1, 1, N_campioni);
+% Sottografico 1: Canale Spaziale Grezzo
+subplot(4, 1, 1);
+plot(omega, S_rx_bit0, 'Color', [0.55 0.55 0.55], 'LineWidth', 0.8);
+title(['(a) Segnale nel Canale ISL (SNR_{in} = -41 dB, v_{rel} = ', num2str(v_rel/1000, '%.2f'), ' km/s, \theta = 60°)']);
+xlabel('\omega (Banda Base Normalizzata)'); ylabel('Ampiezza');
+legend('Segnale Ricevuto S_{rx}(\omega)', 'Location', 'northeast');
+grid on;
+% Sottografico 2: Spettro Intercettatore Eve (Singolo Shot)
+subplot(4, 1, 2);
+plot(u_axis, Spec_Eve_single_dB, 'Color', [0.2 0.2 0.2], 'LineWidth', 0.9);
+title('(b) Intercettatore Eve: FFT Standard su Singolo Pacchetto (Nessuna Traccia di Chirp Quantistico)');
+xlabel('Frequenza Spaziale u'); ylabel('Densità Spettrale (dB)');
+xlim([-0.25 0.25]); grid on;
+% Sottografico 3: Spettro Intercettatore Eve (Media di Ensemble)
+subplot(4, 1, 3);
+plot(u_axis, Spec_Eve_ensemble_dB, 'Color', [0.85 0.33 0.1], 'LineWidth', 1.0);
+title('(c) Covertness Quantistica: Spettro di Eve mediato su Bit Equiprobabili \rightarrow \langle\Psi\rangle = 0');
+xlabel('Frequenza Spaziale u'); ylabel('Densità Spettrale (dB)');
+xlim([-0.25 0.25]); grid on;
+% Sottografico 4: Decodifica di Bob (Confronto Bit 0 vs Bit 1)
+subplot(4, 1, 4);
+plot(u_axis, Picco_Bob_bit0, 'b', 'LineWidth', 1.3);
+hold on;
+plot(u_axis, Picco_Bob_bit1, 'm', 'LineWidth', 1.3);
+yline(0, 'k:');
+title(['(d) Ricevitore Bob (De-Chirp FrFT + FFT): Picco Coerente (SNR_{out} \approx +', ...
+       num2str(SNR_post_Bob_dB, '%.1f'), ' dB)']);
+xlabel('u (Dominio Frazionario FrFT)'); ylabel('Ampiezza Compressa');
+legend('Bit Decodificato "0" (cos(0) = +1)', 'Bit Decodificato "1" (cos(\pi) = -1)', 'Location', 'northeast');
+xlim([-0.1 0.1]); grid on;
+disp('--- SIMULAZIONE AVANZATA COMPLETATA CON SUCCESSO! ---');
