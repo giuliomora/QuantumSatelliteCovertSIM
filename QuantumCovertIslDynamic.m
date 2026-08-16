@@ -3,30 +3,6 @@
 % Estensione orbitale con Satellite Communications Toolbox
 % Modello: Ione 27Al+ | Doppler Dinamico & FrFT De-chirping
 % =========================================================================
-%
-% v2 - correzioni rispetto alla prima estensione dinamica:
-%   1) Geometria orbitale: ricerca automatica (coarse->fine) della fase
-%      iniziale di Bob per ottenere un vero fly-by ISL (v_rel cambia segno
-%      entro la finestra) a una distanza di crossing target ~300 km,
-%      invece di un "avvicinamento" troncato ai bordi della simulazione.
-%   2) Pointing jitter: la divergenza di fascio usata per il pointing loss
-%      e' un parametro di progetto realistico (allargata oltre il limite
-%      di diffrazione), non piu' comparabile per ordine di grandezza a
-%      sigma_jitter: evita le attenuazioni patologiche (-1000+ dB) viste
-%      nella v1.
-%   3) Catena covert: si torna a trasmettere UN SOLO simbolo selezionabile
-%      a mano (bit_to_send = 0 oppure 1), generato e ricevuto con le
-%      IDENTICHE formule del chirp del modello analitico originale
-%      (stesso c_chirp lato Tx e lato Rx, nessuna perturbazione aggiuntiva
-%      che disallinei il matched filter). Il fattore di scala di
-%      covertness torna quello originale, scorporato dal link budget
-%      dinamico (che nella v1 poteva far collassare l'ampiezza del
-%      simbolo in coincidenza di un fading di puntamento). Risultato:
-%      Bob ottiene un picco FrFT netto e correttamente decodificabile.
-%
-% Richiede: Satellite Communications Toolbox (satelliteScenario, satellite,
-%           states). Testato concettualmente per R2022a+.
-% =========================================================================
  
 clc; clear; close all;
 rng(42);   % Riproducibilita' di rumore AWGN e pointing jitter
@@ -46,60 +22,59 @@ disp('=== SEZIONE 0: Costanti caricate ===');
 disp(['Frequenza portante ottica f0: ', num2str(f0_optical/1e12,'%.3f'), ' THz']);
  
 %% ========================================================================
-% FASE 1: GEOMETRIA ORBITALE E RICERCA AUTOMATICA DEL CROSSING ISL
+% FASE 1: GEOMETRIA ORBITALE CON EFFETTO J2 E TARGETING DEL CROSSING
 % =========================================================================
-disp('--- FASE 1: Ricerca deterministica della geometria di crossing ISL ---');
- 
+disp('--- FASE 1: Ricerca geometria di crossing con perturbazioni J2 ---');
+
 startTime  = datetime(2026,8,14,10,0,0);
 stopTime   = startTime + minutes(15);
-sampleTime = 0.1;                       % Risoluzione temporale finale (s)
+sampleTime = 0.1;                       % Risoluzione temporale (s)
 T_window   = seconds(stopTime - startTime);
-t_target_middle = T_window / 2;         % Centro della finestra (450 s): qui vogliamo il crossing
- 
-altitude_orbit = 800e3;                 % Quota (m)
+t_target_middle = T_window / 2;         % Centro finestra (450 s)
+
+altitude_orbit = 800e3;                 % Quota orbitale (m)
 sma            = Re + altitude_orbit;   % Semiasse maggiore (m)
-ecc            = 0;                     % Orbita quasi-circolare
-incl_deg       = 60;                    % Inclinazione comune (deg)
-argPeri_deg    = 0;                     % Argomento del perigeo (orbita circolare)
- 
-% Offset di RAAN per un angolo di incrocio tra i piani orbitali di 60°,
-% dato incl = 60° per entrambi: cos(theta) = cos(i)^2 + sin(i)^2*cos(dRAAN)
+ecc            = 0.0001;                % Quasi-circolare (compatibile con SGP4/J2)
+incl_deg       = 60;                    % Inclinazione (deg)
+argPeri_deg    = 0;                     % Argomento del perigeo
+
+% Costante armonica zonale J2 terrestre
+J2 = 1.08263e-3;
+
+% Tasso secolare di precessione nodale dRAAN/dt dovuto a J2 (rad/s)
+mu_n      = sqrt(mu_earth / sma^3);     % Moto medio (rad/s)
+p_semi    = sma * (1 - ecc^2);
+raan_rate = -1.5 * mu_n * J2 * (Re / p_semi)^2 * cosd(incl_deg); % rad/s
+disp(['Precessione nodale J2 (dRAAN/dt): ', num2str(rad2deg(raan_rate)*86400,'%.4f'), ' deg/giorno']);
+
+% Configurazione RAAN per incrocio di 60°
 theta_cross_deg = 60;
 cos_dRAAN = (cosd(theta_cross_deg) - cosd(incl_deg)^2) / sind(incl_deg)^2;
 dRAAN_deg = acosd(cos_dRAAN);
 raan_Alice = 0;
 raan_Bob   = dRAAN_deg;
- 
-mu_n      = sqrt(mu_earth / sma^3);     % Moto medio (rad/s), orbita circolare
-T_orbit   = 2*pi / mu_n;                % Periodo orbitale completo (s), ~100 min a 800 km
+
+T_orbit   = 2*pi / mu_n;
 incl_rad  = deg2rad(incl_deg);
 raanA_rad = deg2rad(raan_Alice);
 raanB_rad = deg2rad(raan_Bob);
- 
-% Propagatore analitico di posizione ECI per orbita circolare (u = arg. di
-% latitudine = trueAnomaly per ecc=0). Usato SOLO per la ricerca rapida
-% della fase: l'estrazione dinamica finale userà satelliteScenario/states.
-posCircular = @(u0, raan_rad, t) sma * [ ...
-    cos(raan_rad).*cos(u0 + mu_n*t) - sin(raan_rad).*sin(u0 + mu_n*t).*cos(incl_rad); ...
-    sin(raan_rad).*cos(u0 + mu_n*t) + cos(raan_rad).*sin(u0 + mu_n*t).*cos(incl_rad); ...
+
+% Propagatore analitico per la stima iniziale con correzione di precessione J2
+posCircularJ2 = @(u0, raan0, t) sma * [ ...
+    cos(raan0 + raan_rate*t).*cos(u0 + mu_n*t) - sin(raan0 + raan_rate*t).*sin(u0 + mu_n*t).*cos(incl_rad); ...
+    sin(raan0 + raan_rate*t).*cos(u0 + mu_n*t) + cos(raan0 + raan_rate*t).*sin(u0 + mu_n*t).*cos(incl_rad); ...
     sin(u0 + mu_n*t).*sin(incl_rad) ];
- 
-target_distance = 300e3;                % Distanza ISL target al crossing (m)
- 
-% -------------------------------------------------------------------
-% PASSO A: trovare la FASE RELATIVA Delta = u0_Bob - u0_Alice tale che il
-% minimo GLOBALE di d(t), cercato su un intero periodo orbitale (non sulla
-% finestra troncata di 900 s!), valga ~300 km. Il minimo globale dipende
-% solo da Delta, non dalla fase assoluta: si fissa trueAnom_Alice_ref = 0
-% come riferimento arbitrario per questa ricerca.
-% -------------------------------------------------------------------
+
+target_distance = 300e3;                % 300 km al fly-by
+
+% Ricerca deterministica della fase relativa
 t_full_coarse = 0:2:T_orbit;
-posA_full_coarse = posCircular(0, raanA_rad, t_full_coarse);
+posA_full_coarse = posCircularJ2(0, raanA_rad, t_full_coarse);
 u0_candidates = deg2rad(0:0.5:359.5);
- 
+
 best_obj = Inf; best_u0 = 0; best_t_period = 0;
 for k = 1:numel(u0_candidates)
-    posB_k = posCircular(u0_candidates(k), raanB_rad, t_full_coarse);
+    posB_k = posCircularJ2(u0_candidates(k), raanB_rad, t_full_coarse);
     d_k = vecnorm(posB_k - posA_full_coarse, 2, 1);
     [dmin_k, idx_k] = min(d_k);
     obj_k = abs(dmin_k - target_distance);
@@ -107,16 +82,15 @@ for k = 1:numel(u0_candidates)
         best_obj = obj_k; best_u0 = u0_candidates(k); best_t_period = t_full_coarse(idx_k);
     end
 end
- 
-% Raffinamento locale di Delta (attorno al minimo grossolano, ancora sul
-% periodo intero nell'intorno temporale del minimo trovato)
+
+% Raffinamento locale fine
 t_fine = max(0,best_t_period-10):0.02:min(T_orbit, best_t_period+10);
-posA_fine = posCircular(0, raanA_rad, t_fine);
+posA_fine = posCircularJ2(0, raanA_rad, t_fine);
 u0_fine = best_u0 + deg2rad(-1:0.002:1);
- 
+
 best_obj_f = Inf; best_u0_f = best_u0; best_t_f = best_t_period; best_dmin_f = Inf;
 for k = 1:numel(u0_fine)
-    posB_k = posCircular(u0_fine(k), raanB_rad, t_fine);
+    posB_k = posCircularJ2(u0_fine(k), raanB_rad, t_fine);
     d_k = vecnorm(posB_k - posA_fine, 2, 1);
     [dmin_k, idx_k] = min(d_k);
     obj_k = abs(dmin_k - target_distance);
@@ -124,118 +98,182 @@ for k = 1:numel(u0_fine)
         best_obj_f = obj_k; best_u0_f = u0_fine(k); best_t_f = t_fine(idx_k); best_dmin_f = dmin_k;
     end
 end
- 
-Delta_phase    = best_u0_f;             % Fase relativa Bob-Alice (rad), fissata
-d_min_achieved = best_dmin_f;           % Distanza minima effettivamente raggiunta (m)
- 
-% -------------------------------------------------------------------
-% PASSO B: ri-centrare la FASE ASSOLUTA (mantenendo Delta_phase costante)
-% in modo che il minimo trovato al Passo A cada esattamente a
-% t = t_target_middle (centro della finestra di simulazione di 15 min),
-% cosi' che il crossing (e l'inversione di segno di v_rel) sia visibile
-% comodamente all'interno della finestra osservata.
-% -------------------------------------------------------------------
-u_Alice_at_min_ref = mu_n * best_t_f;   % u di Alice al minimo, nel riferimento trueAnom_Alice_ref=0
- 
+
+Delta_phase        = best_u0_f;
+u_Alice_at_min_ref = mu_n * best_t_f;
+
 trueAnom_Alice = mod(rad2deg(u_Alice_at_min_ref) - rad2deg(mu_n*t_target_middle), 360);
 trueAnom_Bob   = mod(trueAnom_Alice + rad2deg(Delta_phase), 360);
- 
-disp(['Periodo orbitale: ', num2str(T_orbit/60,'%.2f'), ' min']);
-disp(['Fase relativa Bob-Alice (Delta): ', num2str(rad2deg(Delta_phase),'%.4f'), ' deg']);
-disp(['trueAnom_Alice = ', num2str(trueAnom_Alice,'%.4f'), ' deg, trueAnom_Bob = ', ...
-      num2str(trueAnom_Bob,'%.4f'), ' deg']);
-disp(['Crossing atteso a t ~ ', num2str(t_target_middle,'%.1f'), ' s, d_min stimato = ', ...
-      num2str(d_min_achieved/1000,'%.1f'), ' km']);
- 
+
+disp(['Anomalia vera iniziale: Alice = ', num2str(trueAnom_Alice,'%.3f'), ...
+      '°, Bob = ', num2str(trueAnom_Bob,'%.3f'), '°']);
+
 %% ========================================================================
-% FASE 2: SCENARIO DINAMICO CON SATELLITE COMMUNICATIONS TOOLBOX
+% FASE 2: PROPAGAZIONE SGP4/J2, GEOMETRIA ISL E CONGIUNZIONE SOLARE
 % =========================================================================
-disp('--- FASE 2: Propagazione dinamica con satelliteScenario ---');
- 
+disp('--- FASE 2: Propagazione SGP4 e Analisi di Congiunzione Solare ---');
+
 sc = satelliteScenario(startTime, stopTime, sampleTime);
- 
+
+% Configurazione con propagatore SGP4 (integra J2, J3, J4 + drag)
 satAlice = satellite(sc, sma, ecc, incl_deg, raan_Alice, argPeri_deg, ...
-    trueAnom_Alice, "Name", "Alice");
+    trueAnom_Alice, "OrbitPropagator", "sgp4", "Name", "Alice");
 satBob   = satellite(sc, sma, ecc, incl_deg, raan_Bob, argPeri_deg, ...
-    trueAnom_Bob, "Name", "Bob");
- 
+    trueAnom_Bob, "OrbitPropagator", "sgp4", "Name", "Bob");
+
 [posAlice, velAlice, tSamples] = states(satAlice, "CoordinateFrame", "inertial");
 [posBob,   velBob,   ~]        = states(satBob,   "CoordinateFrame", "inertial");
- 
-t_sec = seconds(tSamples - tSamples(1));   % Tempo simulazione (s), riga 1xN
+
+t_sec = seconds(tSamples - tSamples(1));
 N_t   = numel(t_sec);
- 
-% Distanza ISL istantanea e ritardo di propagazione
-deltaPos = posBob - posAlice;              % 3xN (m)
-d_t      = vecnorm(deltaPos, 2, 1);        % Distanza ISL d(t) (m)
-tau_t    = d_t / c_light;                  % Ritardo di propagazione tau(t) (s)
- 
-% Velocita' relativa lungo la linea di vista (LOS, range-rate)
-uLOS     = deltaPos ./ d_t;                % Versore LOS Alice->Bob, 3xN
-deltaVel = velBob - velAlice;              % 3xN (m/s)
-v_rel_t  = sum(deltaVel .* uLOS, 1);       % v_rel(t) (m/s), >0 = allontanamento
- 
-% Doppler ottico non relativistico riferito alla transizione 27Al+
-f_D_t    = -(v_rel_t / c_light) * f0_optical; % Shift Doppler f_D(t) (Hz)
-dfD_dt_t = gradient(f_D_t, sampleTime);       % Doppler-rate df_D/dt (Hz/s)
- 
-[d_min, idx_cross] = min(d_t);
-sign_change = any(diff(sign(v_rel_t)) ~= 0);
-disp(['Distanza minima ISL: ', num2str(d_min/1000,'%.2f'), ' km al campione ', ...
-      num2str(idx_cross), ' (t = ', num2str(t_sec(idx_cross),'%.1f'), ' s)']);
-disp(['v_rel al crossing: ', num2str(v_rel_t(idx_cross)/1000,'%.3f'), ' km/s']);
-if sign_change
-    disp('Fly-by confermato: v_rel cambia segno entro la finestra di simulazione.');
-else
-    disp('ATTENZIONE: v_rel non cambia segno entro la finestra; ripetere la ricerca con finestra piu'' ampia.');
+
+% 1. Cinematica ISL e Doppler
+deltaPos = posBob - posAlice;              % Vettore LOS da Alice a Bob (3xN)
+d_t      = vecnorm(deltaPos, 2, 1);        % Distanza ISL (m)
+tau_t    = d_t / c_light;                  % Ritardo propagazione (s)
+
+uLOS_AliceToBob = deltaPos ./ d_t;         % Versore di puntamento da Alice a Bob
+uLOS_BobToAlice = -uLOS_AliceToBob;        % Versore di puntamento da Bob ad Alice (verso Tx)
+
+deltaVel = velBob - velAlice;
+v_rel_t  = sum(deltaVel .* uLOS_AliceToBob, 1); % Range-rate (m/s)
+
+f_D_t    = -(v_rel_t / c_light) * f0_optical;   % Doppler ottico (Hz)
+dfD_dt_t = gradient(f_D_t, sampleTime);         % Doppler rate (Hz/s)
+
+% 2. Controllo Occlusione Terrestre (Earth Line-of-Sight Clearance)
+% Calcola la quota minima sfiorata dal raggio ottico sopra la Terra
+h_atmosphere_limit = 80e3;                      % Atmosfera densa (m)
+r_min_los = zeros(1, N_t);
+for i = 1:N_t
+    r_A = posAlice(:,i);
+    r_B = posBob(:,i);
+    % Distanza minima della retta passante per A e B dall'origine ECI
+    r_min_los(i) = norm(cross(r_A, r_B)) / norm(r_B - r_A);
 end
-disp(['Doppler f_D al crossing: ', num2str(f_D_t(idx_cross)/1e6,'%.3f'), ' MHz']);
-disp(['Doppler-rate al crossing: ', num2str(dfD_dt_t(idx_cross)/1e3,'%.3f'), ' kHz/s']);
+los_clearance_margin = r_min_los - (Re + h_atmosphere_limit);
+los_blocked = any(los_clearance_margin < 0);
+
+% 3. Vettore Posizione del Sole e Angolo di Congiunzione (Sun Exclusion Angle)
+% Approssimazione analitica accurata della posizione del Sole in ECI (J2000)
+% (1 AU = 1.496e11 m, obliquità dell'eclittica eps_ecl = 23.44°)
+AU = 1.495978707e11;
+eps_ecl = deg2rad(23.439291);
+n_days = days(tSamples - datetime(2000,1,1,12,0,0, 'TimeZone', 'UTC')); % Giorni da J2000.0
+lambda_sun = deg2rad(mod(280.460 + 0.9856474 * n_days, 360)); % Longitudine eclittica apparente
+
+% Coordinate geocentriche inerziali (ECI) del Sole (3xN)
+posSun = AU * [cos(lambda_sun); ...
+               sin(lambda_sun)*cos(eps_ecl); ...
+               sin(lambda_sun)*sin(eps_ecl)];
+
+% Calcolo del Sun-Exclusion Angle per il ricevitore Bob:
+% Angolo tra la LOS ottica (direzione da cui arriva il laser, verso Alice)
+% e la direzione verso il Sole (vettore Bob -> Sole)
+sun_dir_Bob = posSun - posBob;
+uSun_Bob    = sun_dir_Bob ./ vecnorm(sun_dir_Bob, 2, 1);
+
+% theta_sun_exclusion: angolo tra ricezione ottica e centroide solare
+cos_theta_sun = sum(uLOS_BobToAlice .* uSun_Bob, 1);
+theta_sun_rx_deg = rad2deg(acos(min(max(cos_theta_sun, -1), 1)));
+
+% Soglia minima di esclusione tipica dei telescopi ottici spaziali
+theta_sun_crit = 30; % gradi
+sun_blindness_flag = theta_sun_rx_deg < theta_sun_crit;
+
+% Statistiche a console
+[d_min, idx_cross] = min(d_t);
+disp(['Distanza minima di fly-by: ', num2str(d_min/1000,'%.2f'), ' km a t = ', num2str(t_sec(idx_cross),'%.1f'), ' s']);
+disp(['Doppler massimo: ', num2str(max(abs(f_D_t))/1e9,'%.3f'), ' GHz, Doppler-rate: ', num2str(abs(dfD_dt_t(idx_cross))/1e6,'%.3f'), ' MHz/s']);
+
+if los_blocked
+    warning('ATTENZIONE: La linea di vista (LOS) è parzialmente occlusa dalla Terra/Atmosfera!');
+else
+    disp(['Line-of-Sight (LOS) libera: clearance minima sopra atmosfera = ', ...
+          num2str(min(los_clearance_margin)/1000,'%.1f'), ' km']);
+end
+
+disp(['Angolo di esclusione solare (Sun-Rx angle) al crossing: ', num2str(theta_sun_rx_deg(idx_cross),'%.2f'), '°']);
+if any(sun_blindness_flag)
+    warning('ATTENZIONE: Il ricevitore entra nella zona di abbagliamento solare (angolo < 30°)!');
+else
+    disp('Condizione solare OK: ricevitore non abbagliato per tutta la finestra.');
+end
  
 %% ========================================================================
-% FASE 3: LINK BUDGET OTTICO DINAMICO CON POINTING JITTER (PAT)
+% FASE 3: MODELLO DI CANALE OTTICO SATELLITARE STANDARDIZZATO (FSO / PAT)
 % =========================================================================
-disp('--- FASE 3: Link budget ottico dinamico e jitter di puntamento ---');
- 
-D_tx        = 0.20;     % Apertura Tx Alice (m)
-D_rx        = 0.30;     % Apertura Rx Bob (m)
-P_tx_laser  = 100e-3;   % Potenza di pompaggio laser (W)
-sigma_jitter = 1.5e-6;  % Deviazione standard jitter di puntamento (rad)
- 
-% Guadagni ottici dei telescopi (approssimazione ad apertura diffrattiva)
+disp('--- FASE 3: Standardizzazione Canale Ottico (FSO Link Budget & PAT) ---');
+
+% -------------------------------------------------------------------------
+% 1. PARAMETRI OTTICI E OPTO-ELETTRONICI DI SISTEMA
+% -------------------------------------------------------------------------
+D_tx        = 0.20;         % Diametro apertura telescopio Tx Alice (m)
+D_rx        = 0.30;         % Diametro apertura telescopio Rx Bob (m)
+P_tx_laser  = 100e-3;       % Potenza media trasmessa dal laser (W) -> 20 dBm
+
+% Efficienze ottiche e quantiche
+eta_tx      = 0.85;         % Efficienza ottica Alice (specchi, lenti, accoppiamento)
+eta_rx      = 0.80;         % Efficienza ottica Bob (baffle, filtri interferenziali)
+eta_det     = 0.65;         % Efficienza quantica del rivelatore UV (SNSPD / APD)
+T_sym       = 1e-6;         % Durata temporale del simbolo quantistico (1 microsecondo)
+DCR         = 50;           % Dark Count Rate del rivelatore (counts/s)
+
+% Parametri di Puntamento (PAT - Pointing, Acquisition, and Tracking)
+sigma_jitter_pat = 1.5e-6;  % Jitter 1-sigma per singolo asse (rad, 1.5 urad)
+theta_div_beam   = 8.0e-6;  % Divergenza nominale di progetto del fascio (rad)
+
+% -------------------------------------------------------------------------
+% 2. GUADAGNI E ATTENUAZIONE IN SPAZIO LIBERO (FSPL)
+% -------------------------------------------------------------------------
+% Guadagni d'antenna ottica di apertura (standard CCSDS / ITU-R P.2148)
 G_tx = (pi * D_tx / lambda_0)^2;
 G_rx = (pi * D_rx / lambda_0)^2;
- 
-% Divergenza di fascio usata per il modello di pointing-loss: e' un
-% parametro di PROGETTO del sistema (tipicamente allargato appositamente
-% oltre il limite di diffrazione dell'apertura, cosi' da rilassare i
-% requisiti di puntamento), non il limite di diffrazione stretto usato
-% sopra per il guadagno d'antenna. Se si usasse qui il limite di
-% diffrazione stretto (~1.3 microrad), sigma_jitter=1.5 microrad sarebbe
-% dello stesso ordine di grandezza dell'intero fascio e produrrebbe fading
-% patologici; il valore realistico tipico per ISL ottici e' O(10 microrad).
-theta_div_beam = 8e-6;  % rad, divergenza di sistema assunta
- 
-% FSPL dinamico, funzione della distanza istantanea
+
+% FSPL dinamico calcolato lungo la traiettoria orbitale SGP4
 FSPL_t = (4 * pi * d_t / lambda_0).^2;
- 
-% Errore di puntamento stocastico gaussiano indipendente su Alice e Bob
-theta_err_tx = sigma_jitter * randn(1, N_t);
-theta_err_rx = sigma_jitter * randn(1, N_t);
- 
-% Perdita di puntamento (modello Gaussiano del fascio, PAT loss)
-L_point_tx = exp(-8 * (theta_err_tx ./ theta_div_beam).^2);
-L_point_rx = exp(-8 * (theta_err_rx ./ theta_div_beam).^2);
+
+% -------------------------------------------------------------------------
+% 3. MODELLO DI JITTER DI PUNTAMENTO (DISTRIBUZIONE DI RAYLEIGH)
+% -------------------------------------------------------------------------
+% L'errore angolare su Azimuth ed Elevazione e' disaccoppiato e Gaussiano
+theta_az_tx = sigma_jitter_pat * randn(1, N_t);
+theta_el_tx = sigma_jitter_pat * randn(1, N_t);
+theta_err_tx_radiale = sqrt(theta_az_tx.^2 + theta_el_tx.^2); % Rayleigh
+
+theta_az_rx = sigma_jitter_pat * randn(1, N_t);
+theta_el_rx = sigma_jitter_pat * randn(1, N_t);
+theta_err_rx_radiale = sqrt(theta_az_rx.^2 + theta_el_rx.^2); % Rayleigh
+
+% Attenuazione PAT (modello di disallineamento esponenziale per fasci Gaussiani)
+L_point_tx = exp(-8 * (theta_err_tx_radiale ./ theta_div_beam).^2);
+L_point_rx = exp(-8 * (theta_err_rx_radiale ./ theta_div_beam).^2);
 L_point_t  = L_point_tx .* L_point_rx;
- 
-% Potenza ricevuta istantanea, con e senza degradazione da jitter
-P_rx_ideal_t = P_tx_laser * (G_tx * G_rx) ./ FSPL_t;
+
+% -------------------------------------------------------------------------
+% 4. LINK BUDGET DINAMICO E CONTEGGIO FOTONICO
+% -------------------------------------------------------------------------
+% Potenza ottica ideale e con fading stocastico
+P_rx_ideal_t = P_tx_laser * eta_tx * eta_rx * (G_tx * G_rx) ./ FSPL_t;
 P_rx_t       = P_rx_ideal_t .* L_point_t;
- 
-disp(['Potenza ricevuta media (con jitter): ', num2str(mean(P_rx_t),'%.3e'), ' W']);
-disp(['Degradazione media da pointing jitter: ', ...
-      num2str(10*log10(mean(L_point_t)),'%.2f'), ' dB']);
- 
+
+% Flusso medio di fotoni di segnale incidenti sul rivelatore per simbolo
+n_photons_signal_t = (P_rx_t * T_sym / E_fotone) * eta_det;
+
+% Fotoni spuri di fondo / Dark counts per simbolo
+n_photons_noise_t  = (DCR * T_sym) * ones(1, N_t);
+
+% -------------------------------------------------------------------------
+% STATISTICHE DEL CANALE A CONSOLE
+% -------------------------------------------------------------------------
+P_rx_crossing_dBm = 10*log10(P_rx_t(idx_cross)*1e3);
+L_point_avg_dB    = 10*log10(mean(L_point_t));
+
+disp(['Potenza Rx al crossing (con jitter ed efficienze): ', num2str(P_rx_crossing_dBm,'%.2f'), ' dBm']);
+disp(['Perdita media di puntamento (PAT Loss): ', num2str(L_point_avg_dB,'%.2f'), ' dB']);
+disp(['Numero medio di fotoni per simbolo al crossing: ', num2str(n_photons_signal_t(idx_cross),'%.2e'), ' fotoni/simbolo']);
+disp(['Dark Counts attesi per simbolo: ', num2str(n_photons_noise_t(idx_cross),'%.2e'), ' fotoni/simbolo']);
+
 %% ========================================================================
 % FASE 4: SEGNALE QUANTISTICO - UN SOLO BIT SELEZIONABILE (ALICE)
 % =========================================================================
@@ -399,18 +437,19 @@ legend([h_dist, h_vrel], ...
        'Location', 'northeast', 'FontSize', 8);
 grid on;
 
-% (b) Link budget ottico dinamico con degradazione da pointing jitter
+% (b) Link budget ottico standardizzato con fading PAT di Rayleigh
 subplot(4,1,2);
 h_p_ideal = plot(t_sec, 10*log10(P_rx_ideal_t*1e3), 'Color', [0.55 0.55 0.55], 'LineStyle', '--', 'LineWidth', 1.2);
 hold on;
 h_p_jit   = plot(t_sec, 10*log10(P_rx_t*1e3), 'Color', [0 0.45 0.75], 'LineWidth', 1.1);
+xline(t_sec(idx_cross), 'k:', 'Crossing Fly-by', 'LineWidth', 1.0);
 xlabel('Tempo di simulazione [s]'); 
 ylabel('Potenza Ricevuta P_{rx}(t) [dBm]');
 legend([h_p_ideal, h_p_jit], ...
-       {'P_{rx} Ideale (Attenuazione FSPL pura)', ...
-        'P_{rx} Effettiva (con Jitter di Puntamento \sigma = 1.5 \murad)'}, ...
+       {'P_{rx} Ideale (FSPL + Efficienze Ottiche)', ...
+        'P_{rx} Effettiva (Jitter di Rayleigh \sigma = 1.5 \murad)'}, ...
        'Location', 'best', 'FontSize', 8);
-title('(b) Link Budget Ottico Dinamico e Fading da Pointing Jitter (PAT)');
+title('(b) Link Budget Ottico FSO Dinamico con Perdite PAT di Rayleigh');
 grid on;
 
 % (c) Spettro Eve: singolo shot vs media di ensemble
@@ -452,5 +491,38 @@ legend([h_peak, h_soglia, h_det], ...
 title(['(d) Ricevitore di Bob (De-Chirp FrFT): Rilevazione Coerente (SNR_{post-FrFT} \approx +', ...
        num2str(SNR_post_Bob_dB,'%.1f'), ' dB)']);
 xlim([-0.1 0.1]); grid on;
+
+%% ========================================================================
+% FASE 8b: MONITORAGGIO AMBIENTALE, VISIBILITÀ LOS E CONGIUNZIONE SOLARE
+% =========================================================================
+figure('Name', 'Analisi Geometria Orbitale e Ambiente Solare', 'Color', 'w', 'Position', [100, 100, 900, 600]);
+
+% (1) Angolo di esclusione solare
+subplot(2,1,1);
+plot(t_sec, theta_sun_rx_deg, 'Color', [0.85 0.33 0.1], 'LineWidth', 1.4);
+hold on;
+yline(theta_sun_crit, 'r--', ['Soglia Critica Abbagliamento (', num2str(theta_sun_crit), '°)'], 'LineWidth', 1.2);
+xline(t_sec(idx_cross), 'k:', 'Crossing Fly-by', 'LineWidth', 1.0);
+grid on; 
+xlabel('Tempo di simulazione [s]'); 
+ylabel('Angolo Sole-LOS [deg]');
+title('Angolo di Esclusione Solare al Ricevitore Bob (\theta_{Sun})');
+legend({'Angolo Sole-Puntamento Ricevitore', 'Limite Cieco Solare', 'Istante di Crossing'}, ...
+    'Location', 'best', 'FontSize', 8);
+
+% (2) Margine di clearance atmosferica
+subplot(2,1,2);
+plot(t_sec, los_clearance_margin / 1000, 'Color', [0 0.5 0], 'LineWidth', 1.4);
+hold on;
+yline(0, 'r--', 'Limite Atmosfera Densa (80 km)', 'LineWidth', 1.2);
+xline(t_sec(idx_cross), 'k:', 'Crossing Fly-by', 'LineWidth', 1.0);
+grid on; 
+xlabel('Tempo di simulazione [s]'); 
+ylabel('Margine di Clearance [km]');
+title('Margine di Visibilità Ottica Intersatellitare (LOS Clearance)');
+legend({'Clearance sopra l''Atmosfera', 'Soglia di Occlusione Terrestre', 'Istante di Crossing'}, ...
+    'Location', 'best', 'FontSize', 8);
+
+disp('--- TUTTI I GRAFICI GENERATI CON SUCCESSO! ---');
 
 disp('--- SIMULAZIONE DINAMICA COMPLETATA CON SUCCESSO! ---');
