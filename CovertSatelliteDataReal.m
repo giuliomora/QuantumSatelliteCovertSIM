@@ -1,1166 +1,917 @@
 % =========================================================================
-% SIMULATORE DI THROUGHPUT REALISTICO - LINK ISL QUANTUM-COVERT (LEO-LEO)
-% Versione "avionica": banda IF da SmallSat, guadagno d'antenna coerente
-% con la divergenza reale, jitter di tracking Doppler residuo (floor di
-% BER fisiologico). Stessa architettura della versione benchmark.
-% Modello: Ione 27Al+ | Doppler Dinamico & FrFT De-chirping
+% SIMULATORE ISL QUANTUM-COVERT BASATO SULL'EFFETTO DOPPLER QUANTISTICO
+% VERSIONE 2 - revisione del ricevitore, del criterio di prestazione,
+%              del punto operativo, del modello di imprinting e del
+%              modello di avversario.
 %
-% DIFFERENZE RISPETTO AL BENCHMARK (che restano documentate per confronto)
-%  1) B_IF = 100 MHz (SmallSat/CubeSat) invece di 16.384 GHz da banco.
-%     N = 16384 invariato -> stesso guadagno di processo (+42.1 dB), ma
-%     T_sym = N/B_IF ~ 163.84 us e bit rate lordo ~ 6.1 kbit/s.
-%  2) Guadagno d'antenna Tx/Rx con la formula documentata dell'oggetto
-%     gaussianAntenna del Satellite Communications Toolbox (Fase 3), non
-%     piu' al limite di diffrazione ne' con un fattore di scala scollegato
-%     dall'apertura.
-%  3) Bob non conosce il bin di picco con precisione infinita: un errore
-%     di tracking Doppler residuo (oscillatore/GPS) sposta casualmente la
-%     lettura di +/-1..2 bin -> compare un FLOOR di BER irriducibile,
-%     visibile per confronto diretto con la curva analitica (che non lo
-%     include, perche' assume sincronismo perfetto).
+% FISICA DI RIFERIMENTO
+%   P. T. Grochowski, A. R. H. Smith, A. Dragan, K. Debski,
+%   "Quantum time dilation in atomic spectra", PRR 3, 023053 (2021)
+%   + estensione: ritardo differenziale di preparazione Delta_t fra i due
+%     rami della sovrapposizione (NOTA Q2). Senza questa estensione il
+%     termine di interferenza NON e' un chirp.
 %
-% Tutto il resto (geometria SGP4/J2, congiunzione solare, struttura delle
-% campagne Monte Carlo, metriche di throughput) e' invariato nella logica.
+% CHE COSA CAMBIA RISPETTO ALLA VERSIONE 1 (le cinque correzioni)
+%   (1) RICEVITORE. Bob non legge piu' il bin DC di fft(Rx.*chiave), che e'
+%       la somma NON PESATA di tutti gli N campioni: raccoglieva rumore da
+%       16384 campioni per estrarre segnale da ~544. Ora pesa per
+%       l'inviluppo noto I_env prima del de-chirp, cioe' esegue il vero
+%       filtro adattato. Guadagno ~10 dB in SNR (vedi 5Q, validazione
+%       BER simulata contro Q(d) analitica).
+%   (2) CRITERIO. La soglia "BER <= 1e-3" e' stata rimossa come figura di
+%       merito: un canale covert DEVE girare a BER grezza alta con codifica
+%       forte. Il criterio e' ora la CAPACITA' per simbolo e il volume
+%       integrato sul passaggio. BER_soglia resta solo come diagnostica.
+%   (3) PUNTO OPERATIVO. sep_su_Delta non e' piu' scelto a mano: viene
+%       trovato risolvendo numericamente il problema di progetto
+%           max_sep  sum_m n_m C(d_m)   s.v.  sqrt(sum_m n_m delta_m^2) <= SNR_thr
+%       cioe' massimizzare il volume informativo del passaggio sotto il
+%       vincolo che la statistica di rivelazione ACCUMULATA di Eve resti
+%       sotto soglia (legge della radice quadrata).
+%   (4) IMPRINTING E CALIBRAZIONE. Introdotto cfg.OD, la profondita' di
+%       modulazione frazionaria del fascio di sonda (prima implicitamente
+%       assunta = 1, cioe' modulazione al 100%: irrealistico per un singolo
+%       ione). Introdotto cfg.eps_sub, errore relativo di conoscenza del
+%       profilo classico da sottrarre, con sweep dedicato (FASE 6Q-bis).
+%   (5) MODELLO DI AVVERSARIO. Due Eve dichiarate:
+%         Eve-A "ignara": rivelatore d'energia senza chiave di de-chirp.
+%         Eve-B "informata" (Kerckhoffs): conosce C e applica lo stesso
+%               filtro adattato di Bob, misurando |z|^2. E' piu' sensibile
+%               di Eve-A di un fattore esatto sqrt(N).
+%       Sotto Eve-B lo schema NON e' covert: se Bob decodifica, Eve rileva.
+%       L'argomento di sicurezza difendibile e' GEOMETRICO (Eve deve stare
+%       fisicamente dentro il fascio FSO): quantificato in 4Q.12.
+%
+% ADD-ON MATLAB: Satellite Communications Toolbox (satelliteScenario,
+% satellite, states) e Phased Array System Toolbox (fspl). Nessun altro.
 % =========================================================================
 
 clc; clear; close all;
 
-% -------------------------------------------------------------------------
-% SEED MASTER UNICO PER TUTTA LA CAMPAGNA
-% -------------------------------------------------------------------------
-% Ogni realizzazione Monte Carlo usa un SUBSTREAM indipendente dello STESSO
-% generatore mrg32k3a, inizializzato con SEED_MASTER. Questo garantisce
-% riproducibilita' totale della campagna e, allo stesso tempo, indipendenza
-% statistica fra le realizzazioni (condizione necessaria perche' la media
-% Monte Carlo sia significativa). mrg32k3a e' scelto perche' e' l'unico
-% generatore MATLAB che espone esplicitamente la proprieta' Substream per
-% la creazione di flussi indipendenti garantiti.
 SEED_MASTER = 42;
-rng(SEED_MASTER, 'twister');   % stream di default (jitter PAT di Fase 3)
+rng(SEED_MASTER, 'twister');
 
 %% ========================================================================
-% SEZIONE 0: COSTANTI FISICHE E PARAMETRI GLOBALI
+% SEZIONE 0: COSTANTI FISICHE
 % =========================================================================
-c_light     = 299792458;          % Velocita' della luce nel vuoto (m/s)
-lambda_0    = 267e-9;             % Transizione UV ione 27Al+ (m)
-f0_optical  = c_light / lambda_0; % Frequenza portante ottica (Hz)
-h_planck    = 6.626e-34;          % Costante di Planck (J*s)
-E_fotone    = h_planck * f0_optical; % Energia del singolo fotone (J)
-k_B         = 1.380649e-23;       % Costante di Boltzmann (J/K)
-u_amu       = 1.66053906660e-27;  % Unita' di massa atomica (kg)
-m_Al27      = 27 * u_amu;         % Massa dello ione 27Al+ (kg)
-Re          = 6378137;            % Raggio equatoriale Terra, WGS84 (m)
-mu_earth    = 3.986004418e14;     % Parametro gravitazionale terrestre (m^3/s^2)
+c_light   = 299792458;
+lambda_0  = 267e-9;                 % 27Al+ 1S0-3P1 (intercombinazione)
+f0_optical= c_light / lambda_0;
+Omega_rad = 2*pi*f0_optical;
+h_planck  = 6.62607015e-34;
+hbar      = 1.054571817e-34;
+E_fotone  = h_planck * f0_optical;
+u_amu     = 1.66053906660e-27;
+m_Al27    = 27 * u_amu;
+mc2_Al27  = m_Al27 * c_light^2;
+Re        = 6378137;
+mu_earth  = 3.986004418e14;
+Gamma0_Hz = 520;                    % larghezza naturale della transizione
 
-disp('=== SEZIONE 0: Costanti caricate ===');
-disp(['Frequenza portante ottica f0: ', num2str(f0_optical/1e12,'%.3f'), ' THz']);
+disp('=== SEZIONE 0 ===');
+disp(['27Al+ 1S0-3P1: lambda = ',num2str(lambda_0*1e9,'%.1f'),' nm, f0 = ', ...
+      num2str(f0_optical/1e12,'%.3f'),' THz, Gamma0 = ',num2str(Gamma0_Hz),' Hz']);
 
 %% ========================================================================
-% FASE 1: GEOMETRIA ORBITALE CON EFFETTO J2 E TARGETING DEL CROSSING
+% FASI 1-2: GEOMETRIA ORBITALE SGP4/J2 (invariata)
 % =========================================================================
-% (Invariata rispetto al benchmark: la geometria orbitale non dipende dai
-% parametri del ricevitore/canale che stiamo rendendo realistici.)
-disp('--- FASE 1: Ricerca geometria di crossing con perturbazioni J2 ---');
+disp('--- FASI 1-2: Geometria orbitale SGP4/J2 ---');
 
-startTime  = datetime(2026,8,14,10,0,0);
-stopTime   = startTime + minutes(15);
-sampleTime = 0.1;                       % Risoluzione temporale (s)
-T_window   = seconds(stopTime - startTime);
-t_target_middle = T_window / 2;         % Centro finestra (450 s)
+startTime = datetime(2026,8,14,10,0,0);
+stopTime  = startTime + minutes(15);
+sampleTime= 0.1;
+T_window  = seconds(stopTime - startTime);
 
-altitude_orbit = 800e3;                 % Quota orbitale (m)
-sma            = Re + altitude_orbit;   % Semiasse maggiore (m)
-ecc            = 0.0001;                % Quasi-circolare (compatibile con SGP4/J2)
-incl_deg       = 60;                    % Inclinazione (deg)
-argPeri_deg    = 0;                     % Argomento del perigeo
+altitude_orbit = 800e3;  sma = Re + altitude_orbit;
+ecc = 0.0001; incl_deg = 60; argPeri_deg = 0; J2 = 1.08263e-3;
+mu_n = sqrt(mu_earth/sma^3);
+raan_rate = -1.5*mu_n*J2*(Re/(sma*(1-ecc^2)))^2*cosd(incl_deg);
+dRAAN_deg = acosd((cosd(60)-cosd(incl_deg)^2)/sind(incl_deg)^2);
+raan_Alice = 0; raan_Bob = dRAAN_deg;
+T_orbit = 2*pi/mu_n; incl_rad = deg2rad(incl_deg);
 
-J2 = 1.08263e-3;                        % Armonica zonale terrestre
+posC = @(u0,raan0,t) sma*[ ...
+  cos(raan0+raan_rate*t).*cos(u0+mu_n*t)-sin(raan0+raan_rate*t).*sin(u0+mu_n*t).*cos(incl_rad); ...
+  sin(raan0+raan_rate*t).*cos(u0+mu_n*t)+cos(raan0+raan_rate*t).*sin(u0+mu_n*t).*cos(incl_rad); ...
+  sin(u0+mu_n*t).*sin(incl_rad)];
 
-mu_n      = sqrt(mu_earth / sma^3);     % Moto medio (rad/s)
-p_semi    = sma * (1 - ecc^2);
-raan_rate = -1.5 * mu_n * J2 * (Re / p_semi)^2 * cosd(incl_deg); % rad/s
-disp(['Precessione nodale J2 (dRAAN/dt): ', num2str(rad2deg(raan_rate)*86400,'%.4f'), ' deg/giorno']);
-
-theta_cross_deg = 60;
-cos_dRAAN = (cosd(theta_cross_deg) - cosd(incl_deg)^2) / sind(incl_deg)^2;
-dRAAN_deg = acosd(cos_dRAAN);
-raan_Alice = 0;
-raan_Bob   = dRAAN_deg;
-
-T_orbit   = 2*pi / mu_n;
-incl_rad  = deg2rad(incl_deg);
-raanA_rad = deg2rad(raan_Alice);
-raanB_rad = deg2rad(raan_Bob);
-
-posCircularJ2 = @(u0, raan0, t) sma * [ ...
-    cos(raan0 + raan_rate*t).*cos(u0 + mu_n*t) - sin(raan0 + raan_rate*t).*sin(u0 + mu_n*t).*cos(incl_rad); ...
-    sin(raan0 + raan_rate*t).*cos(u0 + mu_n*t) + cos(raan0 + raan_rate*t).*sin(u0 + mu_n*t).*cos(incl_rad); ...
-    sin(u0 + mu_n*t).*sin(incl_rad) ];
-
-target_distance = 300e3;                % 300 km al fly-by
-
-t_full_coarse = 0:2:T_orbit;
-posA_full_coarse = posCircularJ2(0, raanA_rad, t_full_coarse);
-u0_candidates = deg2rad(0:0.5:359.5);
-
-best_obj = Inf; best_u0 = 0; best_t_period = 0;
-for k = 1:numel(u0_candidates)
-    posB_k = posCircularJ2(u0_candidates(k), raanB_rad, t_full_coarse);
-    d_k = vecnorm(posB_k - posA_full_coarse, 2, 1);
-    [dmin_k, idx_k] = min(d_k);
-    obj_k = abs(dmin_k - target_distance);
-    if obj_k < best_obj
-        best_obj = obj_k; best_u0 = u0_candidates(k); best_t_period = t_full_coarse(idx_k);
-    end
+tc = 0:2:T_orbit; pA = posC(0,0,tc); u0c = deg2rad(0:0.5:359.5);
+bo = Inf; bu = 0; bt = 0;
+for k = 1:numel(u0c)
+    dk = vecnorm(posC(u0c(k),deg2rad(raan_Bob),tc)-pA,2,1);
+    [dm,ik] = min(dk); ok = abs(dm-300e3);
+    if ok < bo, bo = ok; bu = u0c(k); bt = tc(ik); end
 end
-
-t_fine = max(0,best_t_period-10):0.02:min(T_orbit, best_t_period+10);
-posA_fine = posCircularJ2(0, raanA_rad, t_fine);
-u0_fine = best_u0 + deg2rad(-1:0.002:1);
-
-best_obj_f = Inf; best_u0_f = best_u0; best_t_f = best_t_period; best_dmin_f = Inf;
-for k = 1:numel(u0_fine)
-    posB_k = posCircularJ2(u0_fine(k), raanB_rad, t_fine);
-    d_k = vecnorm(posB_k - posA_fine, 2, 1);
-    [dmin_k, idx_k] = min(d_k);
-    obj_k = abs(dmin_k - target_distance);
-    if obj_k < best_obj_f
-        best_obj_f = obj_k; best_u0_f = u0_fine(k); best_t_f = t_fine(idx_k); best_dmin_f = dmin_k;
-    end
+tf = max(0,bt-10):0.02:min(T_orbit,bt+10); pAf = posC(0,0,tf);
+u0f = bu + deg2rad(-1:0.002:1); bof = Inf; buf = bu; btf = bt;
+for k = 1:numel(u0f)
+    dk = vecnorm(posC(u0f(k),deg2rad(raan_Bob),tf)-pAf,2,1);
+    [dm,ik] = min(dk); ok = abs(dm-300e3);
+    if ok < bof, bof = ok; buf = u0f(k); btf = tf(ik); end
 end
-
-Delta_phase        = best_u0_f;
-u_Alice_at_min_ref = mu_n * best_t_f;
-
-trueAnom_Alice = mod(rad2deg(u_Alice_at_min_ref) - rad2deg(mu_n*t_target_middle), 360);
-trueAnom_Bob   = mod(trueAnom_Alice + rad2deg(Delta_phase), 360);
-
-disp(['Anomalia vera iniziale: Alice = ', num2str(trueAnom_Alice,'%.3f'), ...
-      '°, Bob = ', num2str(trueAnom_Bob,'%.3f'), '°']);
-
-%% ========================================================================
-% FASE 2: PROPAGAZIONE SGP4/J2, GEOMETRIA ISL E CONGIUNZIONE SOLARE
-% =========================================================================
-disp('--- FASE 2: Propagazione SGP4 e Analisi di Congiunzione Solare ---');
+trueAnom_Alice = mod(rad2deg(mu_n*btf)-rad2deg(mu_n*T_window/2),360);
+trueAnom_Bob   = mod(trueAnom_Alice+rad2deg(buf),360);
 
 sc = satelliteScenario(startTime, stopTime, sampleTime);
+satA = satellite(sc,sma,ecc,incl_deg,raan_Alice,argPeri_deg,trueAnom_Alice,"OrbitPropagator","sgp4","Name","Alice");
+satB = satellite(sc,sma,ecc,incl_deg,raan_Bob,  argPeri_deg,trueAnom_Bob,  "OrbitPropagator","sgp4","Name","Bob");
+[posAlice,velAlice,tS] = states(satA,"CoordinateFrame","inertial");
+[posBob,  velBob,  ~ ] = states(satB,"CoordinateFrame","inertial");
 
-satAlice = satellite(sc, sma, ecc, incl_deg, raan_Alice, argPeri_deg, ...
-    trueAnom_Alice, "OrbitPropagator", "sgp4", "Name", "Alice");
-satBob   = satellite(sc, sma, ecc, incl_deg, raan_Bob, argPeri_deg, ...
-    trueAnom_Bob, "OrbitPropagator", "sgp4", "Name", "Bob");
-
-[posAlice, velAlice, tSamples] = states(satAlice, "CoordinateFrame", "inertial");
-[posBob,   velBob,   ~]        = states(satBob,   "CoordinateFrame", "inertial");
-
-t_sec = seconds(tSamples - tSamples(1));
-N_t   = numel(t_sec);
-
-deltaPos = posBob - posAlice;
-d_t      = vecnorm(deltaPos, 2, 1);
-tau_t    = d_t / c_light;
-
-uLOS_AliceToBob = deltaPos ./ d_t;
-uLOS_BobToAlice = -uLOS_AliceToBob;
-
-deltaVel = velBob - velAlice;
-v_rel_t  = sum(deltaVel .* uLOS_AliceToBob, 1);
-
-f_D_t    = -(v_rel_t / c_light) * f0_optical;
+t_sec = seconds(tS-tS(1)); N_t = numel(t_sec);
+dPos = posBob-posAlice; d_t = vecnorm(dPos,2,1);
+uLOS = dPos./d_t; v_rel_t = sum((velBob-velAlice).*uLOS,1);
+f_D_t = -(v_rel_t/c_light)*f0_optical;
 dfD_dt_t = gradient(f_D_t, sampleTime);
 
-% Occlusione terrestre
-h_atmosphere_limit = 80e3;
-r_min_los = zeros(1, N_t);
+r_min = zeros(1,N_t);
 for i = 1:N_t
-    r_A = posAlice(:,i);
-    r_B = posBob(:,i);
-    r_min_los(i) = norm(cross(r_A, r_B)) / norm(r_B - r_A);
+    r_min(i) = norm(cross(posAlice(:,i),posBob(:,i)))/norm(posBob(:,i)-posAlice(:,i));
 end
-los_clearance_margin = r_min_los - (Re + h_atmosphere_limit);
-los_blocked = any(los_clearance_margin < 0);
+los_margin = r_min-(Re+80e3);
 
-% Posizione del Sole e angolo di esclusione
-AU = 1.495978707e11;
-eps_ecl = deg2rad(23.439291);
-n_days = days(tSamples - datetime(2000,1,1,12,0,0, 'TimeZone', 'UTC'));
-lambda_sun = deg2rad(mod(280.460 + 0.9856474 * n_days, 360));
-
-posSun = AU * [cos(lambda_sun); ...
-               sin(lambda_sun)*cos(eps_ecl); ...
-               sin(lambda_sun)*sin(eps_ecl)];
-
-sun_dir_Bob = posSun - posBob;
-uSun_Bob    = sun_dir_Bob ./ vecnorm(sun_dir_Bob, 2, 1);
-cos_theta_sun = sum(uLOS_BobToAlice .* uSun_Bob, 1);
-theta_sun_rx_deg = rad2deg(acos(min(max(cos_theta_sun, -1), 1)));
-
-theta_sun_crit = 30;
-sun_blindness_flag = theta_sun_rx_deg < theta_sun_crit;
+AU = 1.495978707e11; eps_ecl = deg2rad(23.439291);
+nd = days(tS-datetime(2000,1,1,12,0,0,'TimeZone','UTC'));
+lam_s = deg2rad(mod(280.460+0.9856474*nd,360));
+posSun = AU*[cos(lam_s); sin(lam_s)*cos(eps_ecl); sin(lam_s)*sin(eps_ecl)];
+uSun = (posSun-posBob)./vecnorm(posSun-posBob,2,1);
+theta_sun = rad2deg(acos(min(max(sum((-uLOS).*uSun,1),-1),1)));
+link_available = (los_margin>=0) & (theta_sun>=30);
 
 [d_min, idx_cross] = min(d_t);
-disp(['Distanza minima di fly-by: ', num2str(d_min/1000,'%.2f'), ' km a t = ', num2str(t_sec(idx_cross),'%.1f'), ' s']);
-disp(['Doppler massimo: ', num2str(max(abs(f_D_t))/1e9,'%.3f'), ' GHz, Doppler-rate: ', num2str(abs(dfD_dt_t(idx_cross))/1e6,'%.3f'), ' MHz/s']);
-
-if los_blocked
-    warning('ATTENZIONE: La linea di vista (LOS) è parzialmente occlusa dalla Terra/Atmosfera!');
-else
-    disp(['Line-of-Sight (LOS) libera: clearance minima sopra atmosfera = ', ...
-          num2str(min(los_clearance_margin)/1000,'%.1f'), ' km']);
-end
-
-disp(['Angolo di esclusione solare (Sun-Rx angle) al crossing: ', num2str(theta_sun_rx_deg(idx_cross),'%.2f'), '°']);
-if any(sun_blindness_flag)
-    warning('ATTENZIONE: Il ricevitore entra nella zona di abbagliamento solare (angolo < 30°)!');
-else
-    disp('Condizione solare OK: ricevitore non abbagliato per tutta la finestra.');
-end
-
-link_available = (los_clearance_margin >= 0) & (~sun_blindness_flag);
+disp(['Fly-by minimo: ',num2str(d_min/1000,'%.2f'),' km a t = ',num2str(t_sec(idx_cross),'%.1f'),' s']);
+disp(['Doppler ottico max: ',num2str(max(abs(f_D_t))/1e9,'%.3f'),' GHz | Doppler-rate al crossing: ', ...
+      num2str(abs(dfD_dt_t(idx_cross))/1e6,'%.3f'),' MHz/s']);
+disp(['Disponibilita'' link (LOS+Sole): ',num2str(100*mean(link_available),'%.1f'),' %']);
 
 %% ========================================================================
-% FASE 3: MODELLO DI CANALE OTTICO REALISTICO (FSO / PAT)
+% FASE 3: LINK BUDGET OTTICO (invariata)
 % =========================================================================
-disp('--- FASE 3: Canale Ottico Realistico (FSO Link Budget & PAT) ---');
+disp('--- FASE 3: Link budget FSO ---');
+D_tx=0.20; D_rx=0.30; P_tx=100e-3;
+eta_tx=0.85; eta_rx=0.80; eta_det=0.65; rho_ap=0.65;
+sigma_jit_pat=1.5e-6; theta_div=8.0e-6;
 
-D_tx        = 0.20;         % Apertura Tx Alice (m)
-D_rx        = 0.30;         % Apertura Rx Bob (m)
-P_tx_laser  = 100e-3;       % Potenza media trasmessa (W)
-
-eta_tx      = 0.85;         % Efficienza ottica di catena Tx (specchi/accoppiamento) - NON e' l'aperture efficiency d'antenna, vedi sotto
-eta_rx      = 0.80;         % Efficienza ottica di catena Rx
-eta_det     = 0.65;
-DCR         = 50;           % Dark Count Rate (counts/s)
-
-sigma_jitter_pat = 1.5e-6;  % Jitter PAT 1-sigma per asse (rad) - usato SOLO nel fading di puntamento sotto
-theta_div_beam   = 8.0e-6;  % Divergenza di progetto usata SOLO nella formula di fading di puntamento
-                             % (exp(-8*(theta_err/theta_div)^2)), non piu' nel guadagno (vedi sotto):
-                             % resta un parametro indipendente ancora da verificare in letteratura.
-
-% GUADAGNO D'ANTENNA: FORMULA DOCUMENTATA DI gaussianAntenna (Satellite
-% Communications Toolbox), non piu' una coppia di formule scollegate per
-% Tx e Rx. Dalla documentazione ufficiale dell'oggetto gaussianAntenna:
-%   boresightGain = ApertureEfficiency * (pi*D/lambda)^2      [lineare]
-%   beamwidth_3dB = 70*lambda/D                                [gradi]
-% Si applica la STESSA formula, con la STESSA convenzione, sia a Tx che a
-% Rx: un'apertura e' un'apertura, che emetta o raccolga luce. Si usa
-% ApertureEfficiency = 0.65, il valore di DEFAULT che il toolbox stesso
-% assegna a un gaussianAntenna quando non specificato altrimenti (vedi
-% documentazione transmitter/gaussianAntenna) - non un numero scelto a
-% mano. Questo sostituisce sia il precedente G_tx=32/theta_div^2 (che
-% legava il guadagno a una divergenza scelta indipendentemente da D_tx,
-% rischiando un'incoerenza fisica fra apertura e divergenza dichiarate)
-% sia il precedente G_rx al limite di diffrazione puro (che assumeva
-% implicitamente efficienza di apertura del 100%, non realistica).
-rho_ap_tx = 0.65;    % Aperture efficiency Tx (default toolbox gaussianAntenna)
-rho_ap_rx = 0.65;    % Aperture efficiency Rx (default toolbox gaussianAntenna)
-
-G_tx = rho_ap_tx * (pi * D_tx / lambda_0)^2;
-G_rx = rho_ap_rx * (pi * D_rx / lambda_0)^2;
-
-beamwidth_3dB_tx_deg = 70 * lambda_0 / D_tx;   % formula documentata gaussianAntenna (gradi)
-beamwidth_3dB_tx_rad = deg2rad(beamwidth_3dB_tx_deg);
-
-disp(['Guadagno Tx (gaussianAntenna, ApertureEfficiency=', num2str(rho_ap_tx), '): ', ...
-      num2str(10*log10(G_tx),'%.2f'), ' dB']);
-disp(['Guadagno Rx (gaussianAntenna, ApertureEfficiency=', num2str(rho_ap_rx), '): ', ...
-      num2str(10*log10(G_rx),'%.2f'), ' dB']);
-disp(['Beamwidth a -3 dB (formula gaussianAntenna, 70*lambda/D): ', ...
-      num2str(beamwidth_3dB_tx_rad*1e6,'%.3f'), ' urad - per confronto con theta_div_beam ' ...
-      '= ', num2str(theta_div_beam*1e6,'%.1f'), ' urad usato nel fading di puntamento (grandezze ' ...
-      'angolari diverse, non direttamente comparabili: beamwidth a -3dB di guadagno vs ' ...
-      'divergenza 1/e^2 di intensita'' del fascio laser).']);
-
-% FSPL: funzione standard fspl() invece della formula scritta a mano
-% (risultato identico, (4*pi*R/lambda)^2 in dB - qui solo per tracciabilita'
-% a una funzione MATLAB validata invece che a un'espressione inline).
-FSPL_t = 10.^(fspl(d_t, lambda_0) / 10);
-
-theta_az_tx = sigma_jitter_pat * randn(1, N_t);
-theta_el_tx = sigma_jitter_pat * randn(1, N_t);
-theta_err_tx_radiale = sqrt(theta_az_tx.^2 + theta_el_tx.^2);
-
-theta_az_rx = sigma_jitter_pat * randn(1, N_t);
-theta_el_rx = sigma_jitter_pat * randn(1, N_t);
-theta_err_rx_radiale = sqrt(theta_az_rx.^2 + theta_el_rx.^2);
-
-L_point_tx = exp(-8 * (theta_err_tx_radiale ./ theta_div_beam).^2);
-L_point_rx = exp(-8 * (theta_err_rx_radiale ./ theta_div_beam).^2);
-L_point_t  = L_point_tx .* L_point_rx;
-
-P_rx_ideal_t = P_tx_laser * eta_tx * eta_rx * (G_tx * G_rx) ./ FSPL_t;
-P_rx_t       = P_rx_ideal_t .* L_point_t;
-
-P_rx_crossing_dBm = 10*log10(P_rx_t(idx_cross)*1e3);
-L_point_avg_dB    = 10*log10(mean(L_point_t));
-
-disp(['Potenza Rx al crossing (con jitter ed efficienze): ', num2str(P_rx_crossing_dBm,'%.2f'), ' dBm']);
-disp(['Perdita media di puntamento (PAT Loss): ', num2str(L_point_avg_dB,'%.2f'), ' dB']);
+G_tx = rho_ap*(pi*D_tx/lambda_0)^2;
+G_rx = rho_ap*(pi*D_rx/lambda_0)^2;
+FSPL_t = 10.^(fspl(d_t,lambda_0)/10);
+Lp_t = exp(-8*((sqrt((sigma_jit_pat*randn(1,N_t)).^2+(sigma_jit_pat*randn(1,N_t)).^2))./theta_div).^2) .* ...
+       exp(-8*((sqrt((sigma_jit_pat*randn(1,N_t)).^2+(sigma_jit_pat*randn(1,N_t)).^2))./theta_div).^2);
+P_rx_ideal_t = P_tx*eta_tx*eta_rx*(G_tx*G_rx)./FSPL_t;
+P_rx_t = P_rx_ideal_t.*Lp_t;
+disp(['P_rx al crossing: ',num2str(10*log10(P_rx_t(idx_cross)*1e3),'%.2f'),' dBm']);
 
 %% ========================================================================
-% FASE 4: CONFIGURAZIONE AVIONICA DELLA CAMPAGNA MULTI-BIT
+% FASE 4Q: STATO QUANTISTICO, IMPRINTING E PUNTO OPERATIVO
 % =========================================================================
-disp('--- FASE 4: Configurazione campagna multi-bit (banda IF da SmallSat) ---');
-
+disp('--- FASE 4Q: stato quantistico, chirp derivato, punto operativo ---');
 cfg = struct();
 
-% --- Banda IF REALISTICA da ricevitore SmallSat/CubeSat ---
-% B_IF: valore rappresentativo, dichiarato, di un ricevitore ottico
-% coerente classe CubeSat (ordine di grandezza confermato da ricevitori
-% ISL coerenti a DSP dimostrati in letteratura, ~100 Mbit/s di classe
-% affine). Non e' il risultato di un dimensionamento fine (linewidth
-% laser + banda del loop di tracking + margine), perche' NON serve: B_IF
-% entra nel simulatore solo attraverso T_sym = N/B_IF, che fissa la scala
-% assoluta del bit rate e del tempo di rivelazione di Eve (entrambi
-% lineari in B_IF). BER, floor di tracking e curva di covertness NON
-% dipendono da B_IF - dipendono solo da N (guadagno di processo) e dalla
-% SNR covert relativa al fondo classico (Fase 5). Cambiare B_IF cambia
-% quindi la scala del risultato, non la conclusione sulla fattibilita'
-% della comunicazione covert: per questo motivo un valore rappresentativo
-% dichiarato e' sufficiente, senza richiedere un dimensionamento di
-% precisione da letteratura specialistica.
-cfg.B_IF         = 100e6;        % 100 MHz (invece dei 16.38 GHz da banco)
-cfg.N            = 2^14;         % Campioni per simbolo -> INVARIATO: stesso guadagno di processo
-cfg.T_sym        = cfg.N / cfg.B_IF;             % ~163.84 us
-R_b_raw          = 1 / cfg.T_sym;                % ~6.1 kbit/s
+% --- 4Q.1 Trappola: Delta discende dallo stato fondamentale del moto -----
+cfg.f_secolare = 3e6;
+w_sec  = 2*pi*cfg.f_secolare;
+cfg.Delta = sqrt(m_Al27*hbar*w_sec/2)/(m_Al27*c_light);   % in p/(mc)
 
-% --- FORMA D'ONDA: chirp dimensionato ESPLICITAMENTE su B_IF, non piu' un
-% valore ereditato per inerzia. Si sceglie una frazione di banda occupata
-% dal chirp rispetto a B_IF (margine per guard-band e roll-off dei filtri
-% anti-aliasing): frac_BW_chirp = 1200/16384 = 7.32%, la stessa frazione
-% che i valori del benchmark (300*pi, 100*pi) occupavano gia' implicitamente
-% a 16.38 GHz -> qui viene resa un parametro di progetto esplicito invece
-% che una coincidenza numerica. cfg.offset/cfg.c_chirp = 1/3 e' mantenuto
-% (definisce l'asimmetria della banda occupata attorno al centro).
-%
-% Derivazione: l'escursione di frequenza istantanea del chirp e'
-%   f(omega) = (2*c_chirp*omega + offset) * (B_IF/N) / pi ,  omega in [-1,1]
-% Imponendo che l'escursione totale (da omega=-1 a omega=+1) valga
-% frac_BW_chirp * B_IF, con offset = c_chirp/3, si ottiene
-%   c_chirp = frac_BW_chirp * N * pi / 4
-frac_BW_chirp    = 1200/16384;                  % 7.32% di B_IF (design esplicito)
-cfg.c_chirp      = frac_BW_chirp * 2^14 * pi / 4;   % = 300*pi (stesso valore validato)
-cfg.offset       = cfg.c_chirp / 3;                 % = 100*pi (stessa asimmetria validata)
+% --- 4Q.2 theta = pi/4 (scelta invertita rispetto al paper, NOTA Q6) -----
+% Segnale di Bob ~ sin(2*theta) MASSIMO; delta_Q (Eq.32) ~ sin(4*theta)
+% ESATTAMENTE NULLO: il centroide di riga non si sposta col bit e il canale
+% di rivelazione via tracking del centroide si chiude.
+cfg.theta = pi/4;
 
-B_chirp_occ_Hz   = frac_BW_chirp * cfg.B_IF;
-disp(['Chirp dimensionato su B_IF: occupa ', num2str(B_chirp_occ_Hz/1e6,'%.2f'), ...
-      ' MHz (', num2str(frac_BW_chirp*100,'%.1f'), ' % di B_IF), margine per guard-band = ', ...
-      num2str((1-frac_BW_chirp)*100,'%.1f'), ' %']);
+% --- 4Q.3 Ritardo differenziale: origine fisica del chirp ---------------
+% ATTENZIONE (limite fisico, non numerico): exp(-i p^2 t/2 m hbar) e'
+% l'evoluzione di PARTICELLA LIBERA. In trappola armonica uno stato
+% coerente ruota nello spazio delle fasi e NON accumula questa fase
+% quadratica. Delta_t richiede quindi o ione rilasciato (i due rami si
+% separano di sep*Delta*c*Delta_t, calcolato piu' sotto) o un potenziale
+% state-dependent che congela un ramo. Va dichiarato in tesi.
+cfg.Delta_t = 20e-6;                 % ritardo differenziale (s)
+cfg.C_chirp = mc2_Al27*cfg.Delta_t/(2*hbar*Omega_rad^2);   % [s^2/rad^2]
 
-% --- FONDO CLASSICO: ALLARGAMENTO DOPPLER TERMICO DELLO IONE 27Al+ ------
-% Il "fondo classico" sotto cui si nasconde il segnale covert NON e' un
-% inviluppo arbitrario: e' il profilo spettrale del canale classico
-% legittimo co-locato, cioe' la riga di emissione dello ione intrappolato
-% 27Al+ allargata per effetto Doppler termico dal moto residuo dello ione.
-% E' quindi una quantita' DERIVABILE da principi primi, non un parametro
-% da giustificare:
-%
-%     sigma_nu = nu0 * sqrt(k_B*T_ion / (m*c^2))          [Hz, sigma gaussiana]
-%
-% CORREZIONE DI COERENZA rispetto alla versione precedente: prima
-% sigma_doppler era fissato a 0.15 nel dominio normalizzato, cioe' come
-% frazione fissa di B_IF/2. Ma questo implica che, cambiando B_IF, cambia
-% silenziosamente la TEMPERATURA implicita dello ione - il che e'
-% fisicamente rovesciato: la temperatura e' una proprieta' della trappola,
-% del tutto indipendente dalla banda IF del ricevitore. Ora il verso della
-% derivazione e' corretto: si fissa T_ion (fisica), e sigma_doppler nel
-% dominio normalizzato ne discende insieme a B_IF.
-T_ion = 13.02e-3;    % Temperatura dello ione intrappolato (K)
-                     % 13 mK: ione 27Al+ raffreddato simpateticamente in
-                     % trappola compatta. Sopra il limite Doppler teorico
-                     % (~1 mK) per tenere conto di micromoto in eccesso e
-                     % riscaldamento anomalo, realistici in un dispositivo
-                     % qualificato per lo spazio. Valore scelto anche per
-                     % continuita' con le campagne gia' validate (riproduce
-                     % sigma_doppler = 0.150).
-
-sigma_doppler_Hz = f0_optical * sqrt(k_B * T_ion / (m_Al27 * c_light^2));
-cfg.sigma_doppler = sigma_doppler_Hz / (cfg.B_IF/2);   % -> dominio normalizzato
-cfg.sigma_noise  = 0.02;
-
-fwhm_doppler_Hz  = 2*sqrt(2*log(2)) * sigma_doppler_Hz;
-disp(['Fondo classico = riga 27Al+ allargata Doppler a T_ion = ', ...
-      num2str(T_ion*1e3,'%.2f'), ' mK: sigma = ', num2str(sigma_doppler_Hz/1e6,'%.3f'), ...
-      ' MHz (FWHM = ', num2str(fwhm_doppler_Hz/1e6,'%.3f'), ' MHz) -> sigma_doppler = ', ...
-      num2str(cfg.sigma_doppler,'%.4f'), ' nel dominio normalizzato']);
-
-% Verifica di validita' del profilo GAUSSIANO (regime di sideband NON
-% risolte). Per uno ione in trappola di Paul lo spettro e' una portante con
-% bande laterali motionali alla frequenza secolare: il profilo gaussiano di
-% Doppler termico e' una buona approssimazione solo se l'allargamento
-% Doppler SUPERA nettamente la frequenza secolare (weak-binding limit),
-% altrimenti (sideband risolte) lo spettro e' discreto e la gaussiana non
-% descrive piu' la fisica.
-f_secolare_tipica = 3e6;    % Frequenza secolare di trappola tipica (Hz)
-rapporto_sideband = fwhm_doppler_Hz / f_secolare_tipica;
-if rapporto_sideband > 3
-    disp(['Regime di sideband NON risolte (FWHM/f_secolare = ', ...
-          num2str(rapporto_sideband,'%.1f'), '): profilo gaussiano valido.']);
-else
-    warning(['Regime di sideband RISOLTE o marginale (FWHM/f_secolare = ', ...
-             num2str(rapporto_sideband,'%.1f'), '): il profilo gaussiano NON descrive ' ...
-             'piu'' correttamente lo spettro dello ione (servirebbe struttura a bande laterali).']);
+% --- 4Q.4 (NUOVO, punto 4) PROFONDITA' DI IMPRINTING --------------------
+% La v1 normalizzava S_cl a RMS 1 e derivava sigma dal conteggio fotonico:
+% equivaleva ad assumere che lo ione modulasse il fascio di sonda al 100%.
+% La modulazione frazionaria vera e' fissata dalla densita' ottica del
+% singolo ione: OD ~ sigma_abs / A_fascio, con sigma_abs = 3*lambda^2/(2*pi)
+% risonante e A_fascio l'area del fuoco sullo ione.
+sigma_abs   = 3*lambda_0^2/(2*pi);        % sezione d'urto risonante
+w0_fuoco    = 0.20e-6;                     % waist del fuoco sullo ione [m] (NA ~ 0.42)
+A_fascio    = pi*w0_fuoco^2;
+OD_max      = sigma_abs/A_fascio;          % limite superiore ideale
+cfg.OD      = 0.15;                        % progetto: ~55% del limite di singolo ione
+disp(['IMPRINTING: sigma_abs = ',num2str(sigma_abs,'%.2e'),' m^2, waist = ', ...
+      num2str(w0_fuoco*1e6,'%.2f'),' um -> OD_max = ',num2str(OD_max,'%.3f'), ...
+      '  | OD di progetto = ',num2str(cfg.OD,'%.2f')]);
+if cfg.OD > OD_max
+    warning(['OD di progetto superiore al limite di singolo ione (',num2str(OD_max,'%.3f'), ...
+             '): ridurre cfg.OD o stringere il fuoco.']);
 end
 
-cfg.omega        = linspace(-1, 1, cfg.N).';
-cfg.domega       = cfg.omega(2) - cfg.omega(1);
-cfg.win_clutter  = max(3, round(0.01 * cfg.N));
-cfg.chiave       = exp(-1i * (cfg.c_chirp * (cfg.omega.^2)));
-cfg.blocco       = 64;
+% --- 4Q.5 Calibrazioni residue (punto 4 e nota sul rate Doppler) --------
+cfg.eps_sub = 1e-3;   % errore relativo per bin sul profilo classico noto
+                      % (congelato sul frame: e' una calibrazione, non rumore)
+cfg.eps_C   = 1e-3;   % errore relativo sul coefficiente di chirp. Raccoglie
+                      % l'incertezza su Delta_t E il residuo di RATE Doppler
+                      % non compensato, che entra come fase quadratica
+                      % spuria sommandosi a C.
+cfg.F_eccesso = 3.0;  % 1.0 = limite shot puro; 3.0 = caso realistico
+cfg.sigma_f_track = 1e3;   % errore residuo di OFFSET Doppler, 1-sigma (Hz)
 
-% =========================================================================
-% ARCHITETTURA DI PRE-COMPENSAZIONE DOPPLER (dichiarazione esplicita)
-% =========================================================================
-% Il Doppler ottico reale raggiunge decine di GHz (vedi Fase 2: fino a
-% 26.7 GHz in questo passaggio), ben oltre B_IF = 100 MHz: i due numeri
-% sono fisicamente incompatibili a meno di dichiarare esplicitamente come
-% il ricevitore li concilia. Si assume quindi:
-%
-%  1) STADIO GROSSOLANO (analogico/RF, non modellato in dettaglio qui): un
-%     oscillatore locale (LO) agile in frequenza, pilotato in anello
-%     aperto dalle stesse effemeridi/propagatore d'orbita che Bob usa
-%     altrove in questo script (coerente con l'assunzione, gia' presente,
-%     che Bob conosca lo shift Doppler da effemeridi), insegue in continuo
-%     il Doppler ottico predetto f_D(t) e lo rimuove quasi interamente
-%     PRIMA della digitalizzazione. E' cio' che rende fisicamente possibile
-%     stare dentro B_IF = 100 MHz nonostante 26.7 GHz di Doppler assoluto:
-%     senza questo stadio l'architettura non avrebbe senso a questa banda.
-%
-%  2) RESIDUO INTRA-SIMBOLO (quello che il resto dello script modella
-%     esplicitamente): anche un LO ideale non puo' correggere piu' in
-%     fretta di quanto la sua stessa legge di sintonia venga aggiornata;
-%     qui si assume, in modo conservativo verso il ricevitore (il caso
-%     migliore possibile), che il LO applichi UNA correzione per simbolo.
-%     Durante il simbolo (T_sym) il Doppler continua pero' a variare per
-%     effetto del Doppler-RATE dfD_dt_t(t) gia' calcolato in Fase 2,
-%     lasciando un residuo strutturale:
-%         Delta_f_res(t) ~= dfD_dt_t(t) * T_sym
-%         shift_omega(t)  = Delta_f_res(t) / (B_IF/2)
-%     Questa e' la grandezza che sostituisce il precedente fattore di scala
-%     grafico K_doppler_grafico: e' derivata da quantita' gia' presenti nel
-%     modello (Doppler-rate reale, T_sym, B_IF), non da una costante
-%     empirica.
-%
-%  3) RESIDUO STOCASTICO FINE (rumore di fase dell'oscillatore, incertezza
-%     di orbit determination/GPS): modellato separatamente, invariato,
-%     come jitter intero sul bin di decisione (cfg.sigma_bin_track, sotto).
-%     E' un contributo ULTERIORE rispetto al residuo strutturale del punto
-%     2, non un suo sostituto.
-% =========================================================================
+cfg.N = 2^14;
+SNR_soglia_Eve = 3;        % soglia di decisione assunta per Eve
 
-% --- IMPERFEZIONE DI TRACKING DOPPLER (jitter residuo sul bin di picco) ---
-% Bob ricentra lo spettro usando lo shift Doppler stimato dalle effemeridi
-% e dall'oscillatore di bordo, ma la stima ha un residuo stocastico (rumore
-% di fase dell'oscillatore, incertezza di orbit determination/GPS). Lo si
-% modella come un offset intero casuale sul bin di decisione dopo il
-% de-chirp FrFT: offset = round(sigma_bin_track * randn), saturato a +/-2
-% bin.
-%
-% ATTENZIONE ALLA CALIBRAZIONE (verificata con una Monte Carlo dedicata,
-% separando gli errori per esatto valore di offset, a SNR = -41 dB):
-%   offset =  0  ->  BER ~ 0        (2673/2673 letture corrette nel test)
-%   offset = +-1 ->  BER ~ 5-7 %    (il lobo laterale ha guadagno di
-%                                     processo molto minore del lobo
-%                                     principale: la stessa potenza covert
-%                                     che e' larghissimamente sufficiente
-%                                     al bin corretto NON lo e' affatto al
-%                                     bin adiacente)
-%   offset = +-2 ->  BER ~ 85-100 % (praticamente sempre sbagliato)
-% Il punto critico e' che questa degradazione condizionata dipende dalla
-% SNR nominale: a una SNR di comodo molto piu' alta (es. -20 dB) lo stesso
-% offset di 1 bin costa solo ~0.8% di errore, non 5-7%, perche' il margine
-% residuo assorbe la perdita di guadagno del lobo laterale. Calibrare
-% sigma_bin_track a una SNR "facile" e poi applicarlo al punto operativo
-% reale (-41 dB) sottostima quindi il floor di un ordine di grandezza: e'
-% l'errore fatto nella prima versione di questo script (sigma_bin_track =
-% 0.5, floor osservato ~5*10^-2 anziche' i pochi per mille attesi). La
-% calibrazione qui sotto e' stata rifatta DIRETTAMENTE alla SNR di
-% ancoraggio: sigma_bin_track = 0.20 da' un floor a -41 dB di ~7*10^-4,
-% che cresce con continuita' (non resta piatto) verso pochi 10^-3 avvicinandosi
-% al ginocchio del waterfall intrinseco: e' un secondo termine di degrado
-% dominato dalla sincronizzazione vicino al crossing, via via assorbito dal
-% rumore di canale lontano da esso - piu' corretto fisicamente di un floor
-% piatto assunto a priori, e piu' difendibile in tesi.
-cfg.sigma_bin_track = 0.20;
+%% ------------------------------------------------------------------------
+% 4Q.6 (NUOVO, punto 3) SWEEP DI PROGETTO SU sep_su_Delta
+% -------------------------------------------------------------------------
+% sep NON e' piu' scelto a mano. Il volume covert e'
+%     B(sep) = sum_m n_m * C(d_m)      troncato quando
+%     sqrt( sum_m n_m * delta_m^2 ) supera SNR_soglia_Eve
+% con d_m = ||s||/sigma_m la deflessione del filtro adattato all'epoca m e
+% delta_m la deflessione per simbolo del rivelatore di Eve. Il massimo si
+% ottiene tipicamente al confine "Eve rileva esattamente a fine passaggio":
+% sotto quel punto si spreca budget di rivelazione, sopra si tronca.
+disp('--- 4Q.6: sweep di progetto su sep_su_Delta ---');
 
-% Risoluzione in frequenza di un bin dopo la FFT su N campioni a passo
-% 1/B_IF: e' lo standard delta_f = B_IF/N. Da' un significato fisico (Hz)
-% al jitter di tracking, utile per la discussione in tesi.
-delta_f_bin      = cfg.B_IF / cfg.N;
-sigma_track_Hz   = cfg.sigma_bin_track * delta_f_bin;
+N_epoche = 21;
+idx_ep   = round(linspace(1,N_t,N_epoche));
+t_ep     = t_sec(idx_ep);
+dt_ep    = (T_window/N_epoche)*ones(1,N_epoche);
+disp_av  = double(link_available(idx_ep));
 
-% --- Parametri della campagna Monte Carlo ---
-cfg.Nbit_frame   = 256;
-cfg.N_MC         = 12;
-SNR_anchor_dB    = -41;
-snr_vec_dB       = -41:-2.9:-70;     % Campagna A: da -41 dB a -70 dB (11 punti)
-N_epoche         = 21;
-L_frame_vec      = [256, 1024];      % Goodput non codificato a due granularita'
+par = struct('Delta',cfg.Delta,'theta',cfg.theta,'Omega_rad',Omega_rad, ...
+             'f0',f0_optical,'N',cfg.N,'C_chirp',cfg.C_chirp,'OD',cfg.OD, ...
+             'F_eccesso',cfg.F_eccesso,'E_fotone',E_fotone,'eta_det',eta_det, ...
+             'P_ep',P_rx_ideal_t(idx_ep),'dt_ep',dt_ep.*disp_av, ...
+             'SNR_thr',SNR_soglia_Eve);
 
-G_proc_dB = 10*log10(cfg.N);
-disp(['Campioni per simbolo N = ', num2str(cfg.N), ...
-      '  ->  guadagno di processo FrFT = +', num2str(G_proc_dB,'%.1f'), ' dB (invariato vs benchmark)']);
-disp(['Banda IF = ', num2str(cfg.B_IF/1e6,'%.1f'), ' MHz  ->  T_sym = ', ...
-      num2str(cfg.T_sym*1e6,'%.2f'), ' us  ->  bit rate lordo = ', ...
-      num2str(R_b_raw/1e3,'%.3f'), ' kbit/s']);
-disp(['Risoluzione di un bin FFT: ', num2str(delta_f_bin/1e3,'%.3f'), ...
-      ' kHz  ->  jitter di tracking 1-sigma equivalente = ', num2str(sigma_track_Hz/1e3,'%.3f'), ' kHz']);
-
-% Verifica del regime fotonico lungo TUTTO il passaggio (non solo al
-% crossing): con banda IF ridotta il tempo di simbolo e' molto piu' lungo,
-% quindi si integra piu' energia per simbolo nonostante il guadagno Tx
-% coerente sia inferiore a quello di diffrazione.
-n_photons_t = (P_rx_t * cfg.T_sym / E_fotone) * eta_det;
-n_dark_sym  = DCR * cfg.T_sym;
-[n_ph_min, idx_ph_min] = min(n_photons_t);
-
-disp(['Fotoni di segnale per simbolo al crossing: ', num2str(n_photons_t(idx_cross),'%.3e')]);
-disp(['Fotoni di segnale per simbolo, minimo sul passaggio: ', num2str(n_ph_min,'%.3e'), ...
-      ' (a t = ', num2str(t_sec(idx_ph_min),'%.1f'), ' s)']);
-disp(['Dark counts per simbolo: ', num2str(n_dark_sym,'%.3e')]);
-if n_ph_min < 10
-    warning(['Regime di conteggio fotonico (n < 10 fotoni/simbolo) raggiunto in parte del passaggio: ' ...
-             'il modello gaussiano analogico non e'' piu'' valido li'', servirebbe una statistica di Poisson.']);
-else
-    disp('Regime classico (n >> 1) valido per l''intero passaggio: il modello analogico gaussiano si applica.');
-end
-
-%% ========================================================================
-% FASE 5: CAMPAGNA A - BER vs LIVELLO DI COVERTNESS (AL CROSSING)
-% =========================================================================
-disp('--- FASE 5: Campagna A - BER vs covertness (Monte Carlo, con jitter di tracking) ---');
-
-Shift_cross = shiftResiduoDoppler(cfg, dfD_dt_t(idx_cross));
-disp(['Residuo Doppler intra-simbolo al crossing: ', num2str(dfD_dt_t(idx_cross)*cfg.T_sym/1e3,'%.3f'), ...
-      ' kHz  ->  shift_omega = ', num2str(Shift_cross,'%.5f'), ' (dominio normalizzato)']);
-op_cross    = operatoreShift(cfg, Shift_cross);
-kpk_cross   = trovaBinPicco(cfg, op_cross, Shift_cross);
-
-k_teorico = round(cfg.N/2) + 1 + round(cfg.offset/pi * cfg.N/(cfg.N-1));
-if abs(kpk_cross - k_teorico) > 2
-    warning(['Bin di picco misurato (', num2str(kpk_cross), ') distante da quello ' ...
-             'teorico (', num2str(k_teorico), '): verificare offset/chirp.']);
-end
-disp(['Bin di decisione nominale (da effemeridi, prima del jitter di tracking): k = ', num2str(kpk_cross)]);
-
-N_snr   = numel(snr_vec_dB);
-err_A   = zeros(1, N_snr);
-bit_A   = zeros(1, N_snr);
-stat_nom = []; bits_nom = [];
-
-for is = 1:N_snr
-    for mc = 1:cfg.N_MC
-        rs = streamMC(SEED_MASTER, 1, is, mc);
-        [ne, nb, st, bt] = simulaFrame(cfg, op_cross, Shift_cross, ...
-                                       snr_vec_dB(is), kpk_cross, rs);
-        err_A(is) = err_A(is) + ne;
-        bit_A(is) = bit_A(is) + nb;
-        if is == 1 && mc == 1
-            stat_nom = st; bits_nom = bt;
-        end
+sep_vec = 4.0:0.05:9.5;
+nSep = numel(sep_vec);
+B_en = zeros(1,nSep); B_mf = zeros(1,nSep); B_noEve = zeros(1,nSep);
+d_med = zeros(1,nSep); nyq_v = zeros(1,nSep); Tsym_v = zeros(1,nSep);
+for k = 1:nSep
+    o = puntoOperativo(sep_vec(k), par);
+    nyq_v(k)  = o.nyq;
+    Tsym_v(k) = o.T_sym;
+    d_med(k)  = median(o.d_ep);
+    if o.nyq >= pi
+        B_en(k) = 0; B_mf(k) = 0; B_noEve(k) = 0;   % chirp sottocampionato
+    else
+        B_en(k) = o.bits_covert_en;
+        B_mf(k) = o.bits_covert_mf;
+        B_noEve(k) = o.bits_no_eve;
     end
-    fprintf('   SNR covert = %6.2f dB  ->  BER = %8.2e  (%d errori su %d bit)\n', ...
-            snr_vec_dB(is), err_A(is)/bit_A(is), err_A(is), bit_A(is));
 end
+[B_best, k_best] = max(B_en);
+cfg.sep_su_Delta = sep_vec(k_best);
+opt = puntoOperativo(cfg.sep_su_Delta, par);
 
-BER_A = err_A ./ bit_A;
-[BER_A_lo, BER_A_hi] = wilsonCI(err_A, bit_A, 1.96);
+fprintf('   sep ottimo = %.2f  ->  volume covert (Eve-A energia) = %.3e bit\n', ...
+        cfg.sep_su_Delta, B_best);
+fprintf('   allo stesso punto: volume se Eve NON ascolta = %.3e bit\n', opt.bits_no_eve);
+fprintf('   allo stesso punto: volume covert contro Eve-B (chiave nota) = %.3e bit\n', ...
+        opt.bits_covert_mf);
+fprintf('   d mediana sul passaggio = %.3f -> BER grezza mediana = %.3f, C = %.4f bit/simb\n', ...
+        median(opt.d_ep), median(opt.BER_ep), median(opt.C_ep));
 
-% Stima del "floor" locale: media dei 3 punti a SNR piu' alta, dove la BER
-% intrinseca (senza jitter) sarebbe gia' praticamente nulla e quindi il
-% residuo osservato e' dominato dal tracking, non dal rumore di canale. Non
-% e' un floor asintotico in senso stretto (vedi NOTA 1): e' la stima del
-% contributo del tracking nell'intorno del punto di ancoraggio di progetto.
-BER_floor_stimato = mean(BER_A(1:min(3,N_snr)));
-disp(['BER residua stimata vicino al punto di ancoraggio (dominata dal jitter di tracking): ', num2str(BER_floor_stimato,'%.3e')]);
+% Confronto esplicito con la scelta manuale della v1
+o_v1 = puntoOperativo(7.35, par);
+fprintf('   [confronto, stesso OD] sep = 7.35 (scelta manuale v1): volume covert = %.3e bit, ', ...
+        o_v1.bits_covert_en);
+fprintf('d mediana = %.3f\n', median(o_v1.d_ep));
 
-% Curva analitica di riferimento SENZA jitter di tracking (sincronismo
-% perfetto): serve da limite superiore di prestazione, non da predizione
-% realistica. La distanza fra questa curva e i punti Monte Carlo alle alte
-% SNR e' proprio il costo, in BER, dell'imperfezione di sincronizzazione.
-P_classica  = mean(exp(-((cfg.omega - Shift_cross).^2)/(2*cfg.sigma_doppler^2)).^2);
-snr_fine_dB = linspace(min(snr_vec_dB)-2, max(snr_vec_dB)+2, 400);
-P_cov_fine  = P_classica * 10.^(snr_fine_dB/10);
-arg_fine    = sqrt(P_cov_fine * cfg.N) / cfg.sigma_noise;
-BER_teorica = 0.5 * erfc(arg_fine / sqrt(2));
+% --- 4Q.7 Congelamento del punto operativo ------------------------------
+cfg.p1 = -cfg.sep_su_Delta*cfg.Delta/2;
+cfg.p2 = +cfg.sep_su_Delta*cfg.Delta/2;
+cfg.B_IF  = opt.B_IF;
+cfg.T_sym = opt.T_sym;
+cfg.dw    = opt.dw;
+cfg.p_grid= cfg.dw/Omega_rad;
+cfg.chiave= exp(+1i*cfg.C_chirp*cfg.dw.^2);
+S_classico = opt.S_cl;      % gia' scalati per OD
+I_env      = opt.I_env;
+Phi_chirp  = opt.Phi;
+R_b_raw    = 1/cfg.T_sym;
+dw_max     = 2*pi*cfg.B_IF/2;
+larghezza_Hz = f0_optical*(cfg.sep_su_Delta+6)*cfg.Delta;
+
+disp(['Trappola f_sec = ',num2str(cfg.f_secolare/1e6,'%.1f'),' MHz -> Delta = ', ...
+      num2str(cfg.Delta,'%.3e'),' (p/mc), v_spread = ',num2str(cfg.Delta*c_light,'%.4f'),' m/s']);
+disp(['Separazione OTTIMIZZATA = ',num2str(cfg.sep_su_Delta,'%.2f'),' Delta -> dv = ', ...
+      num2str((cfg.p2-cfg.p1)*c_light,'%.4f'),' m/s']);
+disp(['B_IF derivata = ',num2str(cfg.B_IF/1e6,'%.2f'),' MHz -> T_sym = ', ...
+      num2str(cfg.T_sym*1e6,'%.1f'),' us -> R_b = ',num2str(R_b_raw/1e3,'%.3f'),' kbit/s']);
+disp(['Delta_t = ',num2str(cfg.Delta_t*1e6,'%.1f'),' us -> C = ',num2str(cfg.C_chirp,'%.4e'),' s^2/rad^2']);
+
+% Escursione spaziale dei due rami durante Delta_t (verifica di fattibilita')
+dx_rami = (cfg.p2-cfg.p1)*c_light*cfg.Delta_t;
+disp(['VERIFICA FATTIBILITA'' Delta_t: in volo libero i due rami si separano di ', ...
+      num2str(dx_rami*1e6,'%.1f'),' um in ',num2str(cfg.Delta_t*1e6,'%.1f'),' us.']);
+
+% --- 4Q.8 Vincoli su Delta_t: Nyquist, coerenza, larghezza naturale -----
+sigma_env_rad = (cfg.Delta/sqrt(2))*Omega_rad;
+dw_step  = cfg.dw(2)-cfg.dw(1);
+fase_per_campione = 2*cfg.C_chirp*(2*sigma_env_rad)*dw_step;
+disp(['Nyquist del chirp: fase per campione al bordo (2 sigma) = ', ...
+      num2str(fase_per_campione,'%.3f'),' rad -> Delta_t max ~ ', ...
+      num2str(cfg.Delta_t*pi/fase_per_campione*1e6,'%.1f'),' us']);
+% NUOVO: secondo tetto su Delta_t, indipendente da Nyquist. Le frange del
+% chirp al bordo dell'inviluppo hanno passo 2*pi/(2*C*dw_bordo); se scendono
+% sotto Gamma0 vengono lavate dalla lorentziana naturale della transizione.
+passo_frange_Hz = (2*pi/(2*cfg.C_chirp*(2*sigma_env_rad)))/(2*pi);
+disp(['Larghezza naturale: passo delle frange al bordo = ', ...
+      num2str(passo_frange_Hz/1e3,'%.2f'),' kHz contro Gamma0 = ',num2str(Gamma0_Hz),' Hz ', ...
+      '-> margine x',num2str(passo_frange_Hz/Gamma0_Hz,'%.0f'),' (Delta_t max ~ ', ...
+      num2str(cfg.Delta_t*passo_frange_Hz/Gamma0_Hz*1e6,'%.0f'),' us)']);
+
+BT = cfg.C_chirp*(4*sigma_env_rad)^2/pi;
+disp(['Prodotto tempo-banda del chirp: BT = ',num2str(BT,'%.0f')]);
+
+% Sensibilita' del de-chirp all'errore su C (Delta_t + rate Doppler residuo)
+fase_res_max = cfg.eps_C*cfg.C_chirp*(2*sigma_env_rad)^2;
+disp(['Errore su C: eps_C = ',num2str(cfg.eps_C,'%.1e'),' -> fase residua al bordo = ', ...
+      num2str(fase_res_max,'%.3f'),' rad  (requisito: Delta_t noto a meglio di ', ...
+      num2str(100/(cfg.C_chirp*(2*sigma_env_rad)^2),'%.3f'),' %% per 1 rad)']);
+
+% --- 4Q.9 Rumore derivato dal conteggio fotonico -------------------------
+n_bin_cross = (P_rx_t(idx_cross)*cfg.T_sym/E_fotone)*eta_det/cfg.N;
+sigma_cross = cfg.F_eccesso/sqrt(n_bin_cross);
+n_bin_edge  = (P_rx_ideal_t(1)*cfg.T_sym/E_fotone)*eta_det/cfg.N;
+sigma_edge  = cfg.F_eccesso/sqrt(n_bin_edge);
+disp(['Rumore derivato (F_eccesso = ',num2str(cfg.F_eccesso,'%.1f'),'): sigma crossing = ', ...
+      num2str(sigma_cross,'%.2e'),', sigma bordo = ',num2str(sigma_edge,'%.2e')]);
+
+% Tracking di OFFSET Doppler -> spostamento del bin di lettura
+cfg.sigma_bin_track = 4*cfg.C_chirp*cfg.sigma_f_track*dw_max;
+% Con la pesatura per I_env la funzione compressa e' la FT di I_env^2:
+% larghezza sigma_b/sqrt(2) nel dominio spettrale -> picco piu' LARGO di
+% sqrt(2) rispetto alla v1, quindi PIU' tollerante al jitter.
+sigma_k_picco = cfg.N/(2*pi*((sigma_env_rad/sqrt(2))/dw_step));
+disp(['Tracking offset: ',num2str(cfg.sigma_bin_track,'%.2f'),' bin di jitter contro ', ...
+      'larghezza del picco sigma_k = ',num2str(sigma_k_picco,'%.1f'),' bin -> degrado ', ...
+      num2str(-20*log10(exp(-cfg.sigma_bin_track^2/(2*sigma_k_picco^2))),'%.2f'),' dB']);
+
+%% ------------------------------------------------------------------------
+% 4Q.10 (NUOVO, punto 5) DUE MODELLI DI EVE, DICHIARATI
+% -------------------------------------------------------------------------
+% Eve-A "ignara": non possiede la chiave di de-chirp. Conosce il profilo
+%   classico, lo sottrae e somma energie: T = sum (x - S_cl)^2.
+%   Deflessione per simbolo: delta_A = d^2 / sqrt(2N).
+% Eve-B "informata" (ipotesi di Kerckhoffs): conosce C - che dipende solo da
+%   Delta_t, m, Omega, cioe' da grandezze fisiche, non da un segreto - e
+%   puo' comunque stimarlo dallo spettro (autocorrelazione / Wigner) senza
+%   conoscere il bit. Applica lo stesso filtro adattato di Bob e misura
+%   |z|^2. Deflessione per simbolo: delta_B = d^2 / sqrt(2).
+% RAPPORTO ESATTO: delta_B / delta_A = sqrt(N). Con N = 16384, Eve-B e' 128
+% volte piu' sensibile. Conseguenza strutturale: se Bob decodifica (d ~ 3),
+% Eve-B rileva su UN SOLO simbolo. Sotto Kerckhoffs lo schema non e' covert.
+d_cross = interp1(t_ep, opt.d_ep, t_sec(idx_cross), 'linear', 'extrap');
+delta_A = d_cross^2/sqrt(2*cfg.N);
+delta_B = d_cross^2/sqrt(2);
+fprintf('\n--- 4Q.10: modelli di avversario (valutati al crossing) ---\n');
+fprintf('   deflessione di Bob (filtro adattato)     d = %.3f -> BER grezza = %.4f\n', ...
+        d_cross, 0.5*erfc(d_cross/sqrt(2)));
+fprintf('   Eve-A (ignara, energia)      delta/simbolo = %.3e -> rileva dopo %.2e simboli\n', ...
+        delta_A, (SNR_soglia_Eve/delta_A)^2);
+fprintf('   Eve-B (chiave nota, matched) delta/simbolo = %.3e -> rileva dopo %.2e simboli\n', ...
+        delta_B, (SNR_soglia_Eve/delta_B)^2);
+fprintf('   rapporto di sensibilita'' Eve-B/Eve-A     = %.1f  (atteso sqrt(N) = %.1f)\n', ...
+        delta_B/delta_A, sqrt(cfg.N));
+
+% --- 4Q.11 delta_Q: il Doppler classico e' perturbato? (invariato) ------
+dp_pk  = cfg.p2 - cfg.p1;
+dQ_fun = @(ph,th) cos(ph)*sin(4*th)*dp_pk / ...
+                  (4*( cos(ph)*sin(2*th) + exp(dp_pk^2/(4*cfg.Delta^2)) ));
+swing_centroide_Hz = abs(dQ_fun(0,cfg.theta) - dQ_fun(pi,cfg.theta))*f0_optical;
+W_riga_Hz  = f0_optical*cfg.Delta*(cfg.sep_su_Delta/2 + 1);
+n_ph_cross = (P_rx_t(idx_cross)*cfg.T_sym/E_fotone)*eta_det;
+sigma_centroide_Hz = cfg.F_eccesso*W_riga_Hz/sqrt(n_ph_cross);
+snr_eve_centroide  = (swing_centroide_Hz/2)/sigma_centroide_Hz;
+% Robustezza del nullo: theta non e' calibrabile esattamente a pi/4
+eps_theta = 0.01;   % rad
+swing_eps = abs(dQ_fun(0,cfg.theta+eps_theta) - dQ_fun(pi,cfg.theta+eps_theta))*f0_optical;
+fprintf('   delta_Q a theta = pi/4 esatto: swing centroide = %.2e Hz (SNR Eve = %.2e)\n', ...
+        swing_centroide_Hz, snr_eve_centroide);
+fprintf('   robustezza: con errore di %.2f rad su theta -> swing = %.3f Hz contro sigma = %.2f Hz\n', ...
+        eps_theta, swing_eps, sigma_centroide_Hz);
+
+%% ------------------------------------------------------------------------
+% 4Q.12 (NUOVO, punto 5) ARGOMENTO LPI GEOMETRICO
+% -------------------------------------------------------------------------
+% Poiche' sotto Kerckhoffs la covertness statistica non regge, l'argomento
+% di sicurezza difendibile e' che Eve deve stare FISICAMENTE dentro il
+% fascio FSO. Questo e' verificabile e va quantificato, non assunto.
+r_spot_cross = theta_div*d_min;               % raggio dello spot a Bob
+A_spot       = pi*r_spot_cross^2;
+frazione_ang = theta_div^2/4;                 % A_spot / (4 pi d^2)
+fprintf('\n--- 4Q.12: LPI geometrico (argomento di sicurezza principale) ---\n');
+fprintf('   divergenza = %.1f urad -> raggio dello spot a %.0f km = %.2f m\n', ...
+        theta_div*1e6, d_min/1000, r_spot_cross);
+fprintf('   frazione di angolo solido illuminata = %.2e\n', frazione_ang);
+fprintf('   -> Eve deve occupare quel volume per accedere al fascio; fuori da esso\n');
+fprintf('      non riceve NULLA, indipendentemente dal fatto che conosca C.\n');
+
+%% ------------------------------------------------------------------------
+% 4Q.13 Verifiche di consistenza fisica (elisione, bin di compressione)
+% -------------------------------------------------------------------------
+S_bit0 = S_classico + I_env.*cos(Phi_chirp + 0);
+S_bit1 = S_classico + I_env.*cos(Phi_chirp + pi);
+residuo_Eve = max(abs(0.5*(S_bit0+S_bit1) - S_classico))/max(abs(S_classico));
+disp(['Elisione del termine quantistico nella media di Eve: residuo relativo = ', ...
+      num2str(residuo_Eve,'%.3e'),'  (deve essere ~0)']);
+
+% Bin di compressione CON il filtro adattato (pesatura per I_env)
+tmpl  = I_env.*cos(Phi_chirp);
+peso  = I_env.*cfg.chiave;
+k_atteso = cfg.N/2 + 1;
+Y_ref = fftshift(fft(ifftshift(tmpl.*peso)));
+[~, k_misurato] = max(abs(real(Y_ref)));
+disp(['Bin di compressione: atteso = ',num2str(k_atteso),', misurato = ',num2str(k_misurato)]);
+if abs(k_misurato-k_atteso) > 2
+    warning('Il picco non cade dove previsto: verificare C_chirp e la griglia.');
+end
+cfg.kpk = k_misurato;
+
+% Guadagno del filtro adattato rispetto alla somma non pesata della v1
+g_mf   = sqrt(sum(tmpl.^2));                       % ||s||
+g_flat = sum(tmpl.*real(cfg.chiave))/sqrt(cfg.N/2);% somma non pesata (statistica v1)
+fprintf('GUADAGNO DEL FILTRO ADATTATO rispetto al bin DC non pesato (v1): %+.2f dB\n', ...
+        20*log10(g_mf/max(abs(g_flat),eps)));
+
+cfg.Nbit_frame = 1024;    % alzato: serve statistica per misurare capacita' basse
+cfg.N_MC       = 16;
+cfg.blocco     = 32;
+L_frame_vec    = [256 1024];
+BER_soglia     = 1e-3;    % SOLO diagnostica, non piu' figura di merito
 
 %% ========================================================================
-% FASE 6: CAMPAGNA B - BER E THROUGHPUT LUNGO IL PASSAGGIO ORBITALE
+% FASE 5Q: CAMPAGNA A - WATERFALL E VALIDAZIONE CONTRO Q(d)
 % =========================================================================
-disp('--- FASE 6: Campagna B - BER e throughput vs epoca orbitale ---');
+% Validazione: con il filtro adattato la BER simulata deve coincidere con
+% Q(d), d = ||s||/sigma, a meno del jitter di tracking e dell'errore di
+% calibrazione. Se non coincide, c'e' ancora perdita nel ricevitore.
+disp('--- FASE 5Q: Campagna A - waterfall BER e validazione analitica ---');
+sigma_vec = logspace(log10(min(opt.sigma_ep)/6), log10(max(opt.sigma_ep)*6), 16);
+nS = numel(sigma_vec); errA = zeros(1,nS); bitA = zeros(1,nS);
+BER_teo_A = 0.5*erfc((g_mf./sigma_vec)/sqrt(2));
+for is = 1:nS
+    for mc = 1:cfg.N_MC
+        rs = streamMC(SEED_MASTER,1,is,mc);
+        [ne,nb] = simulaFrameQ(cfg, S_classico, I_env, sigma_vec(is), rs);
+        errA(is) = errA(is)+ne; bitA(is) = bitA(is)+nb;
+    end
+    fprintf('   sigma = %.2e -> d = %5.2f | BER sim = %.3e | BER teo = %.3e\n', ...
+            sigma_vec(is), g_mf/sigma_vec(is), errA(is)/bitA(is), BER_teo_A(is));
+end
+BER_A = errA./bitA; [BER_A_lo,BER_A_hi] = wilsonCI(errA,bitA,1.96);
+scarto = max(abs(BER_A - BER_teo_A)./max(BER_teo_A,1e-6));
+fprintf('   scarto massimo simulazione/teoria: %.1f %% (atteso piccolo se il MF e'' corretto)\n', ...
+        100*scarto);
 
-idx_epoche = round(linspace(1, N_t, N_epoche));
-t_epoche   = t_sec(idx_epoche);
-
-BER_B   = zeros(1, N_epoche);
-SNR_B   = zeros(1, N_epoche);
-err_B   = zeros(1, N_epoche);
-bit_B   = zeros(1, N_epoche);
-shift_B = zeros(1, N_epoche);
-
-P_ref_ideal = P_rx_ideal_t(idx_cross);
-
+%% ========================================================================
+% FASE 6Q: CAMPAGNA B - LUNGO IL PASSAGGIO ORBITALE
+% =========================================================================
+disp('--- FASE 6Q: Campagna B - BER, capacita'' e accumulo di Eve vs epoca ---');
+BER_B = zeros(1,N_epoche); errB = zeros(1,N_epoche); bitB = zeros(1,N_epoche);
+sigma_B = zeros(1,N_epoche);
 for ie = 1:N_epoche
-    ii = idx_epoche(ie);
-    shift_B(ie) = shiftResiduoDoppler(cfg, dfD_dt_t(ii));
-
-    if abs(shift_B(ie)) > 0.6
-        warning(['Epoca ', num2str(ie), ': shift Doppler normalizzato = ', ...
-                 num2str(shift_B(ie),'%.2f'), ' -> fuori dal dominio utile del modello.']);
-    end
-
-    op_e = operatoreShift(cfg, shift_B(ie));
-    kpk_e = trovaBinPicco(cfg, op_e, shift_B(ie));
-
-    snr_acc = 0;
+    ii = idx_ep(ie);
+    acc = 0;
     for mc = 1:cfg.N_MC
-        rs = streamMC(SEED_MASTER, 2, ie, mc);
-
-        th_tx = sigma_jitter_pat * randn(rs, 1, 2);
-        th_rx = sigma_jitter_pat * randn(rs, 1, 2);
-        Lp = exp(-8*(norm(th_tx)/theta_div_beam)^2) * ...
-             exp(-8*(norm(th_rx)/theta_div_beam)^2);
-
-        snr_eff_dB = SNR_anchor_dB + 10*log10( (P_rx_ideal_t(ii) * Lp) / P_ref_ideal );
-        snr_acc = snr_acc + snr_eff_dB;
-
-        [ne, nb] = simulaFrame(cfg, op_e, shift_B(ie), snr_eff_dB, kpk_e, rs);
-        err_B(ie) = err_B(ie) + ne;
-        bit_B(ie) = bit_B(ie) + nb;
+        rs = streamMC(SEED_MASTER,2,ie,mc);
+        th1 = sigma_jit_pat*randn(rs,1,2); th2 = sigma_jit_pat*randn(rs,1,2);
+        Lp = exp(-8*(norm(th1)/theta_div)^2)*exp(-8*(norm(th2)/theta_div)^2);
+        n_bin     = (P_rx_ideal_t(ii)*Lp*cfg.T_sym/E_fotone)*eta_det/cfg.N;
+        sigma_eff = cfg.F_eccesso/sqrt(max(n_bin,eps));
+        acc = acc + sigma_eff;
+        [ne,nb] = simulaFrameQ(cfg, S_classico, I_env, sigma_eff, rs);
+        errB(ie) = errB(ie)+ne; bitB(ie) = bitB(ie)+nb;
     end
-    SNR_B(ie) = snr_acc / cfg.N_MC;
-    BER_B(ie) = err_B(ie) / bit_B(ie);
-
-    fprintf('   t = %6.1f s | d = %7.1f km | SNR_eff = %6.2f dB | BER = %8.2e\n', ...
-            t_epoche(ie), d_t(ii)/1000, SNR_B(ie), BER_B(ie));
+    sigma_B(ie) = acc/cfg.N_MC;
+    BER_B(ie)   = errB(ie)/bitB(ie);
+    fprintf('   t = %6.1f s | d = %7.1f km | sigma = %.2e | d_MF = %5.2f | BER = %.3e\n', ...
+            t_ep(ie), d_t(ii)/1000, sigma_B(ie), g_mf/sigma_B(ie), BER_B(ie));
 end
-
-[BER_B_lo, BER_B_hi] = wilsonCI(err_B, bit_B, 1.96);
+[BER_B_lo,BER_B_hi] = wilsonCI(errB,bitB,1.96);
 
 %% ========================================================================
-% FASE 7: METRICHE DI THROUGHPUT
+% FASE 6Q-bis: (NUOVO, punto 4) SWEEP SULL'ERRORE DI SOTTRAZIONE
 % =========================================================================
-disp('--- FASE 7: Metriche di throughput ---');
-
-disponibile = double(link_available(idx_epoche));
-
-R_naive = R_b_raw * (1 - BER_B) .* disponibile;
-C_bsc   = 1 - entropiaBinaria(BER_B);
-R_shan  = R_b_raw * C_bsc .* disponibile;
-
-nL = numel(L_frame_vec);
-FER_L    = zeros(nL, N_epoche);
-R_good_L = zeros(nL, N_epoche);
-Vol_good_L = zeros(1, nL);
-for iL = 1:nL
-    FER_L(iL,:)    = 1 - (1 - BER_B).^L_frame_vec(iL);
-    R_good_L(iL,:) = R_b_raw * (1 - FER_L(iL,:)) .* disponibile;
-    Vol_good_L(iL) = trapz(t_epoche, R_good_L(iL,:));
+% Quanto accuratamente Bob deve conoscere il profilo classico da sottrarre?
+% L'errore e' congelato sul frame (e' una calibrazione), quindi entra come
+% BIAS sulla statistica di decisione, non come rumore che media a zero.
+% Riferimento: se S_cl e' stimato mediando M_cal simboli, eps_sub ~
+% sigma/sqrt(M_cal).
+disp('--- FASE 6Q-bis: sensibilita'' all''errore di sottrazione del profilo classico ---');
+eps_vec = [0 1e-4 1e-3 1e-2 3e-2 1e-1];
+sigma_rif = median(sigma_B);
+BER_eps = zeros(1,numel(eps_vec));
+cfg_tmp = cfg;
+for k = 1:numel(eps_vec)
+    cfg_tmp.eps_sub = eps_vec(k);
+    e = 0; b = 0;
+    for mc = 1:cfg.N_MC
+        rs = streamMC(SEED_MASTER,3,k,mc);
+        [ne,nb] = simulaFrameQ(cfg_tmp, S_classico, I_env, sigma_rif, rs);
+        e = e+ne; b = b+nb;
+    end
+    BER_eps(k) = e/b;
+    M_cal_equiv = (sigma_rif/max(eps_vec(k),eps))^2;
+    fprintf('   eps_sub = %.1e (equivale a mediare %.1e simboli di calibrazione) -> BER = %.3e\n', ...
+            eps_vec(k), M_cal_equiv, BER_eps(k));
 end
+fprintf('   [NOTA] questo sweep modella un errore per bin INDIPENDENTE, che media su ~%.0f\n', ...
+        sqrt(2*pi)*(sigma_env_rad/dw_step));
+fprintf('          campioni utili. Un errore STRUTTURATO (deriva di trappola, moto secolare)\n');
+fprintf('          proietta molto piu'' efficacemente sul template e va studiato a parte.\n');
 
-Vol_naive = trapz(t_epoche, R_naive);
-Vol_shan  = trapz(t_epoche, R_shan);
-
-BER_soglia = 1e-3;
-utile      = (BER_B <= BER_soglia) & (disponibile > 0);
-if any(utile)
-    T_utile = max(t_epoche(utile)) - min(t_epoche(utile));
-else
-    T_utile = 0;
+% Sensibilita' a OD (analitica, non serve Monte Carlo: d e'' lineare in OD)
+disp('--- Sensibilita'' alla profondita'' di imprinting OD ---');
+OD_vec = [0.05 0.10 0.30 0.50 OD_max];
+for k = 1:numel(OD_vec)
+    d_k = (OD_vec(k)/cfg.OD)*(g_mf/sigma_rif);
+    fprintf('   OD = %5.3f -> d = %6.3f -> BER grezza = %.3e -> C = %.4f bit/simbolo\n', ...
+            OD_vec(k), d_k, 0.5*erfc(d_k/sqrt(2)), 1-entropiaBinaria(0.5*erfc(d_k/sqrt(2))));
 end
-
-[~, ie_cross] = min(abs(idx_epoche - idx_cross));
-
-fprintf('\n===================== SINTESI THROUGHPUT =====================\n');
-fprintf('Banda IF                                        : %8.1f MHz\n', cfg.B_IF/1e6);
-fprintf('Bit rate lordo (1 bit/simbolo, T_sym = %.2f us) : %8.3f kbit/s\n', cfg.T_sym*1e6, R_b_raw/1e3);
-fprintf('Guadagno di processo FrFT (N = %d)              : %8.1f dB\n', cfg.N, G_proc_dB);
-fprintf('Covertness di ancoraggio al crossing            : %8.1f dB\n', SNR_anchor_dB);
-fprintf('Floor di BER da jitter di tracking (stimato)    : %8.2e\n', BER_floor_stimato);
-fprintf('BER al crossing (epoca piu'' vicina)             : %8.2e\n', BER_B(ie_cross));
-fprintf('Disponibilità del link (LOS + Sole)             : %7.1f %% della finestra\n', 100*mean(link_available));
-fprintf('Finestra utile (BER <= %.0e)                    : %8.1f s su %.0f s\n', BER_soglia, T_utile, T_window);
-fprintf('--------------------------------------------------------------\n');
-fprintf('Throughput di picco (1-BER)                     : %8.3f kbit/s\n', max(R_naive)/1e3);
-fprintf('Throughput informativo di picco (BSC)           : %8.3f kbit/s\n', max(R_shan)/1e3);
-for iL = 1:nL
-    fprintf('Goodput di picco, frame %4d bit non codificati : %8.3f kbit/s\n', L_frame_vec(iL), max(R_good_L(iL,:))/1e3);
-end
-fprintf('--------------------------------------------------------------\n');
-fprintf('Volume dati per passaggio (1-BER)               : %8.2f kbit  (%6.3f MB)\n', Vol_naive/1e3, Vol_naive/8/1e6);
-fprintf('Volume informativo per passaggio (BSC)          : %8.2f kbit  (%6.3f MB)\n', Vol_shan/1e3, Vol_shan/8/1e6);
-for iL = 1:nL
-    fprintf('Volume utile per passaggio (frame %4d bit)     : %8.2f kbit  (%6.3f MB)\n', ...
-            L_frame_vec(iL), Vol_good_L(iL)/1e3, Vol_good_L(iL)/8/1e6);
-end
-fprintf('==============================================================\n\n');
-
-% Frontiera covertness/rate a B_IF = 100 MHz: dalla formula analitica
-% BER = Q(gamma), gamma = sqrt(P_cov*N)/sigma, si ricava il numero minimo
-% di campioni/simbolo per centrare un BER obiettivo, e quindi il rate
-% massimo sostenibile a banda IF fissata: R_b = B_IF*P_cov/(gamma^2*sigma^2).
-% Il floor di tracking non e' incluso qui: la frontiera resta un limite
-% superiore "con sincronismo perfetto", coerente con l'uso classico che se
-% ne fa in letteratura (limite fisico del solo canale, non del ricevitore).
-BER_obiettivo = 1e-6;
-gamma_req     = sqrt(2) * erfcinv(2 * BER_obiettivo);
-P_cov_sweep   = P_classica * 10.^(snr_fine_dB/10);
-R_max_sweep   = cfg.B_IF * P_cov_sweep / (gamma_req^2 * cfg.sigma_noise^2);
-N_req_anchor  = (gamma_req * cfg.sigma_noise)^2 / (P_classica * 10^(SNR_anchor_dB/10));
-fprintf('Frontiera covertness/rate (BER obiettivo = %.0e, B_IF = %.0f MHz):\n', BER_obiettivo, cfg.B_IF/1e6);
-fprintf('   a %.1f dB di covertness servono N >= %.0f campioni/simbolo\n', SNR_anchor_dB, ceil(N_req_anchor));
-fprintf('   -> rate massimo sostenibile (limite di canale, sincronismo ideale) = %.2f kbit/s\n\n', ...
-        cfg.B_IF/max(N_req_anchor,1)/1e3);
 
 %% ========================================================================
-% FASE 8: INTERCETTORE EVE - SINGOLO FRAME vs MEDIA D'INSIEME MULTI-BIT
+% FASE 7Q: (NUOVO, punto 2) METRICHE BASATE SULLA CAPACITA'
 % =========================================================================
-disp('--- FASE 8: Analisi intercettatore Eve ---');
+% La figura di merito e' la capacita' per simbolo e il volume integrato,
+% non "BER <= 1e-3". Il volume covert e' quello accumulato FINO AL PUNTO in
+% cui la statistica di rivelazione di Eve supera la soglia.
+disp('--- FASE 7Q: capacita'', throughput e volume covert ---');
+n_sym_ep = (dt_ep.*disp_av)/cfg.T_sym;
+C_ep_sim = 1 - entropiaBinaria(BER_B);
+d_ep_sim = g_mf./sigma_B;
+delta_A_ep = d_ep_sim.^2/sqrt(2*cfg.N);
+delta_B_ep = d_ep_sim.^2/sqrt(2);
 
-rs_eve = streamMC(SEED_MASTER, 3, 1, 1);
-[~, ~, ~, ~, Rx_eve] = simulaFrame(cfg, op_cross, Shift_cross, ...
-                                   SNR_anchor_dB, kpk_cross, rs_eve, true);
+bits_cum   = cumsum(n_sym_ep.*C_ep_sim);
+eveA_cum   = sqrt(cumsum(n_sym_ep.*delta_A_ep.^2));
+eveB_cum   = sqrt(cumsum(n_sym_ep.*delta_B_ep.^2));
 
-Y_Eve_single       = fftshift(fft(Rx_eve(:,1)));
-Spec_Eve_single_dB = 20*log10(abs(Y_Eve_single) + eps);
+B_covert_A = volumeAllaSoglia(bits_cum, eveA_cum, SNR_soglia_Eve, ...
+                              n_sym_ep, C_ep_sim, delta_A_ep);
+B_covert_B = volumeAllaSoglia(bits_cum, eveB_cum, SNR_soglia_Eve, ...
+                              n_sym_ep, C_ep_sim, delta_B_ep);
 
-Y_Eve_ens          = fftshift(fft(mean(Rx_eve, 2)));
-Spec_Eve_ens_dB    = 20*log10(abs(Y_Eve_ens) + eps);
+R_shan  = R_b_raw*C_ep_sim.*disp_av;
+nL = numel(L_frame_vec); R_good = zeros(nL,N_epoche); Vol_good = zeros(1,nL);
+for iL = 1:nL
+    R_good(iL,:) = R_b_raw*((1-BER_B).^L_frame_vec(iL)).*disp_av;
+    Vol_good(iL) = trapz(t_ep,R_good(iL,:));
+end
+[~,ie_cr] = min(abs(idx_ep-idx_cross));
 
-% Costo di rivelazione per Eve (rivelatore d'energia, ordine di grandezza):
-% ~1/eta^2 campioni indipendenti per distinguere le due ipotesi. A parita'
-% di eta, con B_IF piu' piccola (100 MHz vs 16.38 GHz da banco) il TEMPO
-% necessario a Eve per accumulare quei campioni cresce proporzionalmente:
-% e' un effetto puramente di banda, non di potenza.
-eta_cov  = 10^(SNR_anchor_dB/10);
-N_eve    = 1 / eta_cov^2;
-T_eve    = N_eve / cfg.B_IF;
-fprintf('Rivelazione d''energia di Eve a %.0f dB: ~%.2e campioni (~%.3f s a %.0f MHz)\n', ...
-        SNR_anchor_dB, N_eve, T_eve, cfg.B_IF/1e6);
+fprintf('\n=========== SINTESI v2 - CANALE DOPPLER QUANTISTICO ===========\n');
+fprintf('Delta_t (ritardo differenziale)         : %8.1f us\n', cfg.Delta_t*1e6);
+fprintf('Separazione OTTIMIZZATA (era 7.35)      : %8.2f Delta\n', cfg.sep_su_Delta);
+fprintf('Profondita'' di imprinting OD            : %8.3f  (max singolo ione %.3f)\n', cfg.OD, OD_max);
+fprintf('B_IF derivata                           : %8.2f MHz\n', cfg.B_IF/1e6);
+fprintf('Bit rate lordo                          : %8.3f kbit/s\n', R_b_raw/1e3);
+fprintf('Guadagno del filtro adattato (vs v1)    : %+8.2f dB\n', 20*log10(g_mf/max(abs(g_flat),eps)));
+fprintf('BER grezza al crossing                  : %8.3f\n', BER_B(ie_cr));
+fprintf('Capacita'' al crossing                   : %8.4f bit/simbolo\n', C_ep_sim(ie_cr));
+fprintf('Capacita'' mediana sul passaggio         : %8.4f bit/simbolo\n', median(C_ep_sim(disp_av>0)));
+fprintf('Throughput informativo di picco (BSC)   : %8.3f kbit/s\n', max(R_shan)/1e3);
+fprintf('[diagnostica] epoche con BER <= %.0e     : %8d su %d\n', BER_soglia, sum(BER_B<=BER_soglia), N_epoche);
+fprintf('---------------------------------------------------------------\n');
+fprintf('VOLUME se Eve non ascolta                : %8.3e bit\n', bits_cum(end));
+fprintf('VOLUME COVERT contro Eve-A (energia)     : %8.3e bit\n', B_covert_A);
+fprintf('   statistica di Eve-A a fine passaggio  : %8.2f  (soglia %.1f)\n', eveA_cum(end), SNR_soglia_Eve);
+fprintf('VOLUME COVERT contro Eve-B (chiave nota) : %8.3e bit\n', B_covert_B);
+fprintf('   statistica di Eve-B a fine passaggio  : %8.2e (soglia %.1f)\n', eveB_cum(end), SNR_soglia_Eve);
+fprintf('---------------------------------------------------------------\n');
+for iL = 1:nL
+    fprintf('[diagnostica] goodput non codificato %4d bit: %8.3e kbit/s\n', ...
+            L_frame_vec(iL), max(R_good(iL,:))/1e3);
+end
+fprintf('CONCLUSIONE: il volume difendibile e'' quello contro Eve-A, e vale solo\n');
+fprintf('se la covertness poggia sull''argomento GEOMETRICO di 4Q.12. Sotto\n');
+fprintf('ipotesi di Kerckhoffs (Eve-B) il canale non e'' covert.\n');
+fprintf('===============================================================\n\n');
 
 %% ========================================================================
-% FASE 9: FIGURE
+% FASE 8Q: FIGURE
 % =========================================================================
-disp('--- FASE 9: Generazione figure ---');
+disp('--- FASE 8Q: Figure ---');
+f_MHz = cfg.dw/(2*pi)/1e6;
 
-u_axis = linspace(-1, 1, cfg.N);
+figure('Name','FigQ1 - Chirp quantistico e filtro adattato','Color','w','Position',[80 60 1150 700]);
 
-% ---------------- FIGURA 1: geometria, link budget, Eve ------------------
-figure('Name', 'Fig1 - Geometria, Link Budget, Eve', 'Color', 'w', ...
-       'Position', [80, 50, 1050, 800]);
+subplot(2,2,1);
+plot(f_MHz,S_classico,'LineWidth',1.4); hold on;
+plot(f_MHz,S_bit0,'LineWidth',0.9);
+xlabel('Detuning [MHz]'); ylabel('Modulazione frazionaria del fascio di sonda');
+title(sprintf('(a) Spettro classico e con perturbazione quantistica (OD = %.2f)',cfg.OD));
+legend({'S_{classico}','S_{quant} (bit 0)'},'Location','best','FontSize',8);
+grid on; xlim([-1 1]*larghezza_Hz/1e6);
 
-subplot(3,1,1);
-yyaxis left;
-h_dist = plot(t_sec, d_t/1000, 'b-', 'LineWidth', 1.3);
-ylabel('Distanza ISL d(t) [km]', 'Color', 'b', 'FontWeight', 'bold');
-ax = gca; ax.YColor = 'b';
-ylim([0, max(d_t/1000)*1.1]);
-yyaxis right;
-h_vrel = plot(t_sec, v_rel_t/1000, 'r-', 'LineWidth', 1.3);
-hold on; yline(0, 'k:', 'LineWidth', 0.8);
-ylabel('v_{rel}(t) [km/s]', 'Color', 'r', 'FontWeight', 'bold');
-ax.YColor = 'r';
-xlabel('Tempo di simulazione [s]');
-title(['(a) Geometria Orbitale ISL: crossing a t = ', num2str(t_sec(idx_cross),'%.1f'), ...
-       ' s (d_{min} = ', num2str(d_min/1000,'%.1f'), ' km)']);
-legend([h_dist, h_vrel], {'Distanza d(t) [sx]', 'Velocità relativa LOS [dx]'}, ...
-       'Location', 'northeast', 'FontSize', 8);
+subplot(2,2,2);
+plot(f_MHz, tmpl, 'LineWidth',1.0); hold on;
+plot(f_MHz, I_env,'--','LineWidth',1.3); plot(f_MHz,-I_env,'--','LineWidth',1.3);
+xlabel('Detuning [MHz]'); ylabel('Termine di interferenza');
+title(sprintf('(b) Perturbazione CHIRP, \\Phi = -C\\Delta\\omega^2 da \\Deltat = %.0f \\mus', cfg.Delta_t*1e6));
+legend({'I_{env}cos(\Phi)','inviluppo \pm I_{env}'},'Location','best','FontSize',8);
+grid on; xlim([-1 1]*2*sigma_env_rad/(2*pi)/1e6);
+
+subplot(2,2,3);
+uax = (1:cfg.N)-cfg.N/2-1;
+Y0_mf = real(fftshift(fft(ifftshift((I_env.*cos(Phi_chirp+0)).*peso))));
+Y1_mf = real(fftshift(fft(ifftshift((I_env.*cos(Phi_chirp+pi)).*peso))));
+Y0_v1 = real(fftshift(fft(ifftshift((I_env.*cos(Phi_chirp+0)).*cfg.chiave))));
+plot(uax,Y0_mf/max(abs(Y0_mf)),'LineWidth',1.4); hold on;
+plot(uax,Y1_mf/max(abs(Y0_mf)),'LineWidth',1.4);
+plot(uax,Y0_v1/max(abs(Y0_v1)),':','LineWidth',1.1);
+yline(0,'k--'); xlabel('bin'); ylabel('Ampiezza compressa (norm.)');
+title('(c) Filtro adattato: picco piu'' largo e piu'' tollerante al jitter');
+legend({'bit 0 (MF)','bit 1 (MF)','bit 0 (somma non pesata, v1)'},'Location','best','FontSize',7);
+grid on; xlim([-80 80]);
+
+subplot(2,2,4);
+bp = BER_A; bp(bp==0) = NaN;
+errorbar(sigma_vec,bp,bp-BER_A_lo,BER_A_hi-bp,'o','LineWidth',1.3,'MarkerSize',5); hold on;
+plot(sigma_vec,BER_teo_A,'-','LineWidth',1.2);
+set(gca,'XScale','log','YScale','log');
+xline(min(opt.sigma_ep),'g--','\sigma crossing','LineWidth',1.1,'LabelOrientation','horizontal');
+xline(max(opt.sigma_ep),'m--','\sigma bordo','LineWidth',1.1,'LabelOrientation','horizontal');
+xlabel('\sigma rumore relativo'); ylabel('BER grezza');
+title('(d) Waterfall: simulazione contro Q(d) analitica');
+legend({'Monte Carlo','Q(\Vert s\Vert/\sigma)'},'Location','best','FontSize',8);
 grid on;
 
-subplot(3,1,2);
-h_p_ideal = plot(t_sec, 10*log10(P_rx_ideal_t*1e3), 'Color', [0.55 0.55 0.55], 'LineStyle', '--', 'LineWidth', 1.2);
-hold on;
-h_p_jit   = plot(t_sec, 10*log10(P_rx_t*1e3), 'Color', [0 0.45 0.75], 'LineWidth', 1.1);
-xline(t_sec(idx_cross), 'k:', 'Crossing', 'LineWidth', 1.0);
-xlabel('Tempo di simulazione [s]');
-ylabel('P_{rx}(t) [dBm]');
-legend([h_p_ideal, h_p_jit], {'P_{rx} ideale (FSPL + guadagno coerente)', ...
-       'P_{rx} con jitter di Rayleigh (\sigma = 1.5 \murad)'}, 'Location', 'best', 'FontSize', 8);
-title('(b) Link Budget Ottico FSO Realistico (guadagno d''antenna coerente con la divergenza)');
-grid on;
+figure('Name','FigQ2 - Passaggio orbitale e accumulo di Eve','Color','w','Position',[110 40 1150 430]);
+subplot(1,3,1);
+yyaxis left; plot(t_ep,BER_B,'o-','LineWidth',1.3,'MarkerSize',4); ylabel('BER grezza'); ylim([0 0.55]);
+yyaxis right; plot(t_ep,C_ep_sim,'s--','LineWidth',1.1,'MarkerSize',4);
+ylabel('Capacita'' [bit/simbolo]');
+xline(t_sec(idx_cross),'k:','Crossing'); xlabel('Tempo [s]');
+title('(a) BER grezza e capacita'' lungo il passaggio'); grid on;
 
-subplot(3,1,3);
-h_eve_single = plot(u_axis, Spec_Eve_single_dB, 'Color', [0.25 0.25 0.25], 'LineWidth', 0.9);
-hold on;
-h_eve_ens    = plot(u_axis, Spec_Eve_ens_dB, 'Color', [0.85 0.33 0.1], 'LineWidth', 1.2);
-xlabel('Frequenza spaziale normalizzata u');
-ylabel('Densità spettrale [dB]');
-legend([h_eve_single, h_eve_ens], ...
-       {'Eve: singolo simbolo (FFT standard)', ...
-        ['Eve: media su ', num2str(cfg.Nbit_frame), ' simboli (elisione del termine covert)']}, ...
-       'Location', 'northeast', 'FontSize', 8);
-title(['(c) Intercettore Eve: invisibilità energetica (SNR = ', num2str(SNR_anchor_dB), ' dB, B_{IF} = ', ...
-       num2str(cfg.B_IF/1e6,'%.0f'), ' MHz)']);
-xlim([-0.25 0.25]); grid on;
+subplot(1,3,2);
+plot(t_ep,bits_cum/1e3,'LineWidth',1.5); hold on;
+yline(B_covert_A/1e3,'g--','Volume covert vs Eve-A','LineWidth',1.2);
+yline(B_covert_B/1e3,'r--','Volume covert vs Eve-B','LineWidth',1.2);
+xlabel('Tempo [s]'); ylabel('Volume cumulato [kbit]');
+title('(b) Volume informativo cumulato'); grid on;
 
-% ---------------- FIGURA 2: BER vs covertness e spazio di decisione ------
-figure('Name', 'Fig2 - BER vs Covertness e Spazio di Decisione', 'Color', 'w', ...
-       'Position', [100, 60, 1000, 460]);
+subplot(1,3,3);
+semilogy(t_ep,max(eveA_cum,1e-12),'LineWidth',1.4); hold on;
+semilogy(t_ep,max(eveB_cum,1e-12),'LineWidth',1.4);
+yline(SNR_soglia_Eve,'k--','soglia','LineWidth',1.2);
+xlabel('Tempo [s]'); ylabel('Statistica di rivelazione accumulata');
+title('(c) Accumulo di Eve (legge della radice quadrata)');
+legend({'Eve-A (ignara)','Eve-B (chiave nota)'},'Location','best','FontSize',8); grid on;
 
-subplot(1,2,1);
-ber_plot = BER_A; ber_plot(ber_plot == 0) = NaN;
-h_th = semilogy(snr_fine_dB, BER_teorica, 'k-', 'LineWidth', 1.3); hold on;
-h_mc = semilogy(snr_vec_dB, ber_plot, 'o', 'Color', [0 0.45 0.74], ...
-                'MarkerFaceColor', [0 0.45 0.74], 'MarkerSize', 5);
-h_ul = semilogy(snr_vec_dB, BER_A_hi, 'v--', 'Color', [0.5 0.5 0.5], 'MarkerSize', 4);
-h_fl = yline(BER_floor_stimato, 'm-.', ['Floor da tracking \approx ', num2str(BER_floor_stimato,'%.1e')], ...
-             'LineWidth', 1.2, 'LabelHorizontalAlignment', 'left');
-yline(BER_soglia, 'r:', 'BER = 10^{-3}', 'LineWidth', 1.0);
-xlabel('SNR covert rispetto al fondo classico [dB]');
-ylabel('BER');
-title(['BER vs covertness, B_{IF} = ', num2str(cfg.B_IF/1e6,'%.0f'), ' MHz - ', ...
-       num2str(cfg.N_MC*cfg.Nbit_frame), ' bit/punto']);
-legend([h_th, h_mc, h_ul, h_fl], {'Analitica (sincronismo ideale): Q(\surd(P_{cov}N)/\sigma)', ...
-       'Monte Carlo (con jitter di tracking)', 'Limite sup. IC 95% (Wilson)', 'Floor stimato'}, ...
-       'Location', 'southwest', 'FontSize', 7.5);
-ylim([1e-5 1]); grid on; set(gca,'XDir','reverse');
+figure('Name','FigQ3 - Progetto: ottimo di sep e sensibilita''','Color','w','Position',[140 20 1150 420]);
+subplot(1,3,1);
+semilogy(sep_vec,max(B_noEve,1e-3),'--','LineWidth',1.2); hold on;
+semilogy(sep_vec,max(B_en,1e-3),'LineWidth',1.6);
+semilogy(sep_vec,max(B_mf,1e-3),'LineWidth',1.2);
+xline(cfg.sep_su_Delta,'k:','ottimo','LineWidth',1.2);
+xline(7.35,'r:','v1 (manuale)','LineWidth',1.1);
+xlabel('sep / \Delta'); ylabel('Volume per passaggio [bit]');
+title('(a) Ottimizzazione del punto operativo');
+legend({'senza Eve','covert vs Eve-A','covert vs Eve-B'},'Location','best','FontSize',7); grid on;
 
-subplot(1,2,2);
-if ~isempty(stat_nom)
-    histogram(stat_nom(bits_nom == 0), 30, 'FaceColor', [0 0.45 0.74], 'FaceAlpha', 0.6); hold on;
-    histogram(stat_nom(bits_nom == 1), 30, 'FaceColor', [0.85 0.33 0.1], 'FaceAlpha', 0.6);
-    xline(0, 'k--', 'LineWidth', 1.2);
-end
-xlabel('Statistica di decisione  Re\{Y(k_{usato})\}');
-ylabel('Occorrenze');
-title(['Spazio di decisione a ', num2str(snr_vec_dB(1),'%.1f'), ' dB (1 frame, con jitter di tracking)']);
-legend({'Bit 0 (\phi = 0)', 'Bit 1 (\phi = \pi)', 'Soglia'}, 'Location', 'best', 'FontSize', 8);
-grid on;
+subplot(1,3,2);
+semilogx(max(eps_vec,1e-5),BER_eps,'o-','LineWidth',1.4);
+xlabel('\epsilon_{sub} (errore relativo sul profilo classico)'); ylabel('BER grezza');
+title('(b) Sensibilita'' alla sottrazione di S_{classico}'); grid on;
 
-% ---------------- FIGURA 3: BER, SNR, throughput lungo il passaggio ------
-figure('Name', 'Fig3 - BER, SNR, Throughput lungo il passaggio', 'Color', 'w', ...
-       'Position', [120, 40, 1080, 460]);
+subplot(1,3,3);
+OD_fine = linspace(0.01,max(OD_max,0.6),200);
+d_fine  = (OD_fine/cfg.OD)*(g_mf/sigma_rif);
+plot(OD_fine, 1-entropiaBinaria(0.5*erfc(d_fine/sqrt(2))),'LineWidth',1.5); hold on;
+xline(cfg.OD,'k:','progetto','LineWidth',1.2);
+xline(OD_max,'r:','limite ione','LineWidth',1.2);
+xlabel('OD (profondita'' di imprinting)'); ylabel('Capacita'' [bit/simbolo]');
+title('(c) Sensibilita'' a OD'); grid on;
 
-subplot(1,2,1);
-ber_b_plot = BER_B; ber_b_plot(ber_b_plot == 0) = NaN;
-yyaxis left;
-semilogy(t_epoche, ber_b_plot, 'o-', 'LineWidth', 1.3, 'MarkerSize', 4); hold on;
-semilogy(t_epoche, BER_B_hi, 'v:', 'Color', [0.5 0.5 0.5], 'MarkerSize', 4);
-yline(BER_floor_stimato, 'm-.', 'LineWidth', 1.0);
-ylabel('BER'); ylim([1e-5 1]);
-yyaxis right;
-plot(t_epoche, SNR_B, 's--', 'LineWidth', 1.1, 'MarkerSize', 4);
-ylabel('SNR covert efficace [dB]');
-xline(t_sec(idx_cross), 'k:', 'Crossing', 'LineWidth', 1.0);
-xlabel('Tempo di simulazione [s]');
-title('(a) BER ed SNR efficace lungo il passaggio');
-legend({'BER (MC)', 'IC 95% sup.', 'Floor stimato', 'SNR_{eff}'}, 'Location', 'best', 'FontSize', 7.5);
-grid on;
-
-subplot(1,2,2);
-yyaxis left;
-h_r1 = plot(t_epoche, R_naive/1e3, 'o-', 'LineWidth', 1.3, 'MarkerSize', 4); hold on;
-h_r2 = plot(t_epoche, R_shan/1e3,  's--', 'LineWidth', 1.2, 'MarkerSize', 4);
-h_r3 = plot(t_epoche, R_good_L(1,:)/1e3, 'd:', 'LineWidth', 1.1, 'MarkerSize', 4);
-h_r4 = plot(t_epoche, R_good_L(2,:)/1e3, '^:', 'LineWidth', 1.1, 'MarkerSize', 4);
-ylabel('Throughput [kbit/s]');
-yyaxis right;
-Vol_cum = cumtrapz(t_epoche, R_shan);
-h_v = plot(t_epoche, Vol_cum/1e3, 'LineWidth', 1.4);
-ylabel('Volume informativo cumulato [kbit]');
-xlabel('Tempo di simulazione [s]');
-title('(b) Throughput istantaneo e volume per passaggio');
-legend([h_r1, h_r2, h_r3, h_r4, h_v], {'R_b(1-BER)', 'R_b(1-H_2(BER)) [BSC]', ...
-       ['Goodput frame ', num2str(L_frame_vec(1)), ' bit'], ...
-       ['Goodput frame ', num2str(L_frame_vec(2)), ' bit'], 'Volume cumulato'}, ...
-       'Location', 'best', 'FontSize', 7);
-grid on;
-
-% ---------------- FIGURA 4: frontiera covertness / rate ------------------
-figure('Name', 'Fig4 - Frontiera Covertness-Rate', 'Color', 'w', 'Position', [140, 80, 700, 420]);
-loglog(10.^(snr_fine_dB/10), R_max_sweep/1e3, 'LineWidth', 1.6); hold on;
-xline(10^(SNR_anchor_dB/10), 'k--', 'Punto di progetto', 'LineWidth', 1.1);
-yline(R_b_raw/1e3, 'r:', 'Rate lordo attuale', 'LineWidth', 1.1);
-grid on;
-xlabel('SNR covert (lineare, rispetto al fondo classico)');
-ylabel('Bit rate massimo sostenibile [kbit/s]');
-title(['Frontiera covertness-rate a B_{IF} = ', num2str(cfg.B_IF/1e6,'%.0f'), ...
-       ' MHz, BER obiettivo = ', num2str(BER_obiettivo,'%.0e'), ' (sincronismo ideale)']);
-
-disp('--- CAMPAGNA MONTE CARLO REALISTICA COMPLETATA CON SUCCESSO! ---');
+disp('--- SIMULAZIONE COMPLETATA ---');
 
 %% ========================================================================
 % FUNZIONI LOCALI
 % =========================================================================
 
-function shift = shiftResiduoDoppler(cfg, dfD_dt)
-% Residuo Doppler intra-simbolo, dopo la pre-compensazione grossolana
-% (analogica/RF, non modellata qui in dettaglio) che rimuove il Doppler
-% ottico assoluto. Anche un oscillatore locale ideale puo' applicare una
-% sola correzione per simbolo: durante T_sym il Doppler continua a
-% variare per effetto del Doppler-rate dfD_dt (Hz/s, gia' calcolato dalla
-% traiettoria SGP4/J2 reale in Fase 2), lasciando un residuo strutturale
-% che qui si converte nel dominio normalizzato omega (1 unita' di omega =
-% B_IF/2 Hz, poiche' l'intero dominio omega in [-1,1] rappresenta l'intera
-% banda IF digitalizzata). Sostituisce la precedente costante di scala
-% grafica K_doppler_grafico con una derivazione tracciabile a B_IF e alla
-% dinamica orbitale reale, invece che a un fattore empirico.
-    delta_f_res = dfD_dt * cfg.T_sym;
-    shift = delta_f_res / (cfg.B_IF/2);
+function out = puntoOperativo(sep, par)
+% Punto di progetto per una data separazione dei pacchetti. Restituisce
+% spettri, deflessioni di Bob e di entrambe le Eve, e i volumi risultanti.
+% Tutto e' derivato: nulla e' scelto a mano dentro questa funzione.
+    Delta = par.Delta; N = par.N;
+    larghezza_Hz = par.f0*(sep+6)*Delta;
+    B_IF  = 4*larghezza_Hz;
+    T_sym = N/B_IF;
+    dw = linspace(-1,1,N).'*(2*pi*B_IF/2);
+    p  = dw/par.Omega_rad;
+    p1 = -sep*Delta/2;  p2 = +sep*Delta/2;
+    A1 = exp(-((p-p1).^2)./(2*Delta^2))./(pi^0.25*sqrt(Delta));
+    A2 = exp(-((p-p2).^2)./(2*Delta^2))./(pi^0.25*sqrt(Delta));
+    w  = 1 + 3*p;                                   % peso di Eq.(26)
+    S_cl  = (cos(par.theta)^2*A1.^2 + sin(par.theta)^2*A2.^2).*w;
+    I_env = (2*cos(par.theta)*sin(par.theta)*A1.*A2).*w;
+    nrm = sqrt(mean(S_cl.^2));
+    % OD: profondita' di modulazione frazionaria del fascio di sonda.
+    S_cl  = par.OD*S_cl/nrm;
+    I_env = par.OD*I_env/nrm;
+    Phi   = -par.C_chirp*dw.^2;
+
+    E_s2 = sum((I_env.*cos(Phi)).^2);      % ||s||^2 con sigma = 1
+
+    n_sym    = par.dt_ep(:).'/T_sym;
+    n_bin_ep = (par.P_ep(:).'*T_sym/par.E_fotone)*par.eta_det/N;
+    sigma_ep = par.F_eccesso./sqrt(max(n_bin_ep,eps));
+    d_ep     = sqrt(E_s2)./sigma_ep;                % deflessione del MF
+    BER_ep   = 0.5*erfc(d_ep/sqrt(2));
+    C_ep     = 1 - entropiaBinaria(BER_ep);
+    dl_A     = d_ep.^2/sqrt(2*N);                   % Eve ignara (energia)
+    dl_B     = d_ep.^2/sqrt(2);                     % Eve con chiave (matched)
+
+    bits_cum = cumsum(n_sym.*C_ep);
+    eveA     = sqrt(cumsum(n_sym.*dl_A.^2));
+    eveB     = sqrt(cumsum(n_sym.*dl_B.^2));
+
+    out.sep=sep; out.B_IF=B_IF; out.T_sym=T_sym; out.dw=dw;
+    out.S_cl=S_cl; out.I_env=I_env; out.Phi=Phi;
+    out.sigma_ep=sigma_ep; out.d_ep=d_ep; out.BER_ep=BER_ep; out.C_ep=C_ep;
+    out.M_pass=sum(n_sym);
+    out.bits_no_eve = bits_cum(end);
+    out.bits_covert_en = volumeAllaSoglia(bits_cum, eveA, par.SNR_thr, n_sym, C_ep, dl_A);
+    out.bits_covert_mf = volumeAllaSoglia(bits_cum, eveB, par.SNR_thr, n_sym, C_ep, dl_B);
+    out.nyq = 2*par.C_chirp*(2*(Delta/sqrt(2))*par.Omega_rad)*(dw(2)-dw(1));
 end
 
-function rs = streamMC(seed_master, id_campagna, id_punto, id_trial)
-% Substream deterministico e univoco a partire da un unico seed master,
-% usando mrg32k3a (unico generatore MATLAB con substream garantiti
-% indipendenti, assegnati come proprieta' dopo la costruzione).
-    sub = 1 + id_trial + 1000*id_punto + 1000000*id_campagna;
-    rs  = RandStream('mrg32k3a', 'Seed', seed_master);
-    rs.Substream = sub;
-end
-
-function op = operatoreShift(cfg, shift)
-% Precalcola l'operatore di ri-centraggio Doppler (interpolazione lineare
-% a passo costante), vettorizzato su matrici di simboli.
-    pos = (cfg.omega + shift - cfg.omega(1)) / cfg.domega + 1;
-    i0  = floor(pos);
-    fr  = pos - i0;
-    ok  = (i0 >= 1) & (i0 + 1 <= cfg.N);
-    op.i0 = i0(ok);
-    op.fr = fr(ok);
-    op.ok = ok;
-    op.N  = cfg.N;
-end
-
-function Sc = applicaShift(op, S)
-    Sc = zeros(op.N, size(S,2));
-    Sc(op.ok, :) = (1 - op.fr) .* S(op.i0, :) + op.fr .* S(op.i0 + 1, :);
-end
-
-function Y = riceviBob(cfg, op, S)
-% Ricentraggio Doppler da effemeridi -> clutter rejection (movmean nativo
-% MATLAB) -> de-chirp FrFT -> compressione spettrale.
-    Sc = applicaShift(op, S);
-    Sc = Sc - movmean(Sc, cfg.win_clutter, 1);
-    Y  = fftshift(fft(Sc .* cfg.chiave, [], 1), 1);
-end
-
-function kpk = trovaBinPicco(cfg, op, shift)
-% Bin di compressione nominale, ricavato dalla forma d'onda nota (senza
-% rumore). E' la stima "media" di Bob (da effemeridi/oscillatore): attorno
-% a questo bin nominale il jitter di tracking residuo introduce poi un
-% errore stocastico di lettura (vedi simulaFrame).
-    Phi  = cfg.c_chirp * ((cfg.omega - shift).^2) + cfg.offset * (cfg.omega - shift);
-    y    = riceviBob(cfg, op, cos(Phi));
-    tmpl = real(y);
-    [~, kpk] = max(abs(tmpl));
-end
-
-function [nerr, nbit, stat, bits, Rx_out] = simulaFrame(cfg, op, shift, snr_db, kpk, rs, salva_rx)
-% Trasmette un frame di cfg.Nbit_frame bit BPSK sul chirp, lo propaga nel
-% canale (fondo classico + rumore), lo demodula E aggiunge l'imperfezione
-% di sincronizzazione: la lettura avviene non esattamente sul bin nominale
-% kpk ma su kpk + offset, dove offset e' un intero casuale (residuo di
-% tracking Doppler dell'oscillatore/GPS) saturato a +/- 2 bin. Questo
-% introduce un floor di BER anche a rumore di canale trascurabile.
-    if nargin < 7, salva_rx = false; end
-    M    = cfg.Nbit_frame;
-    bits = randi(rs, [0 1], 1, M);
-
-    Phi   = cfg.c_chirp * ((cfg.omega - shift).^2) + cfg.offset * (cfg.omega - shift);
-    Scl   = exp(-((cfg.omega - shift).^2) / (2 * cfg.sigma_doppler^2));
-
-    P_cl  = mean(Scl.^2);
-    P_cov = P_cl * 10^(snr_db/10);
-    a_cov = sqrt(2 * P_cov);
-
-    stat = zeros(1, M);
-    if salva_rx
-        Rx_out = zeros(cfg.N, M);
+function B = volumeAllaSoglia(bits_cum, eve, thr, n_sym, C_ep, dl)
+% Volume trasmissibile prima che la statistica accumulata di Eve superi la
+% soglia. Interpolazione lineare in energia dentro l'epoca di superamento.
+    k = find(eve > thr, 1);
+    if isempty(k)
+        B = bits_cum(end);
+        return;
+    end
+    if k == 1
+        prevE2 = 0; prevB = 0;
     else
-        Rx_out = [];
+        prevE2 = eve(k-1)^2; prevB = bits_cum(k-1);
     end
+    quota = n_sym(k)*dl(k)^2;
+    if quota <= 0
+        B = prevB;
+    else
+        frac = min(max((thr^2 - prevE2)/quota, 0), 1);
+        B = prevB + frac*n_sym(k)*C_ep(k);
+    end
+end
 
+function [nerr,nbit] = simulaFrameQ(cfg, S_cl, I_env, sigma_noise, rs)
+% Trasmissione di un frame. Il bit e' la fase relativa phi in {0,pi}: per
+% Eq.(32) il termine di interferenza va come cos(phi), quindi la codifica e'
+% ANTIPODALE per costruzione fisica.
+%
+% RICEVITORE (correzione principale rispetto alla v1): Bob pesa per
+% l'inviluppo noto I_env PRIMA del de-chirp. Il bin DC di
+% fft(Rx.*I_env.*chiave) e' allora esattamente sum(Rx.*I_env.*cos(Phi)),
+% cioe' il filtro adattato al template reale. La v1 usava fft(Rx.*chiave),
+% cioe' la somma NON pesata su tutti gli N campioni: raccoglieva rumore da
+% N campioni per estrarre segnale da ~sqrt(2*pi)*sigma_bin campioni utili.
+%
+% Il segnale NON viene scalato con la distanza: il contrasto e' una
+% modulazione frazionaria (un rapporto non si attenua propagando). La
+% distanza entra tramite sigma_noise, derivato dal conteggio fotonico.
+    M = cfg.Nbit_frame; N = cfg.N;
+    bits = randi(rs,[0 1],1,M);
+    Phi  = -cfg.C_chirp*cfg.dw.^2;
+    tmpl = I_env.*cos(Phi);
+
+    % Errore di calibrazione del profilo classico: CONGELATO sul frame,
+    % quindi agisce come bias sulla decisione, non come rumore che media.
+    S_hat = S_cl.*(1 + cfg.eps_sub*randn(rs,N,1));
+
+    % Errore residuo sul coefficiente di chirp: raccoglie incertezza su
+    % Delta_t e residuo di RATE Doppler non compensato.
+    C_bob  = cfg.C_chirp*(1 + cfg.eps_C*randn(rs,1,1));
+    peso   = I_env.*exp(+1i*C_bob*cfg.dw.^2);
+
+    nerr = 0;
     for i1 = 1:cfg.blocco:M
-        i2  = min(i1 + cfg.blocco - 1, M);
-        b   = bits(i1:i2);
-        nb  = numel(b);
-        Stx = a_cov * cos(Phi + pi * b);
-        Rx  = Scl + Stx + cfg.sigma_noise * randn(rs, cfg.N, nb);
-        if salva_rx, Rx_out(:, i1:i2) = Rx; end
-        Y   = riceviBob(cfg, op, Rx);
-
-        % --- Jitter di tracking Doppler: offset casuale sul bin letto ---
-        off_bin = round(cfg.sigma_bin_track * randn(rs, 1, nb));
-        off_bin = min(max(off_bin, -2), 2);
-        kuse    = min(max(kpk + off_bin, 1), cfg.N);
-        idxLin  = sub2ind(size(Y), kuse, 1:nb);
-        stat(i1:i2) = real(Y(idxLin));
+        i2 = min(i1+cfg.blocco-1,M); b = bits(i1:i2); nb = numel(b);
+        segno = 1-2*b;                              % bit0 -> +1, bit1 -> -1
+        Sig = S_cl + tmpl.*segno;
+        Rx  = Sig + sigma_noise*randn(rs,N,nb);
+        Rx  = Rx - S_hat;                           % sottrazione imperfetta
+        % De-chirp + filtro adattato. L'ifftshift e' ESSENZIALE: il segnale
+        % e' centrato a dw = 0, cioe' al CENTRO dell'array, non all'indice 1.
+        Y   = fftshift(fft(ifftshift(Rx.*peso,1),[],1),1);
+        % Residuo di OFFSET Doppler: sposta il bin di lettura di
+        % k = 4*C*df*dw_max bin (derivato, non calibrato a mano).
+        jit = round(cfg.sigma_bin_track*randn(rs,1,nb));
+        kuse= min(max(cfg.kpk + jit,1),N);
+        stat= real(Y(sub2ind(size(Y),kuse,1:nb)));
+        nerr= nerr + sum(double(stat<0) ~= b);
     end
-
-    dec  = double(stat < 0);
-    nerr = sum(dec ~= bits);
     nbit = M;
 end
 
-function [lo, hi] = wilsonCI(k, n, z)
-% Intervallo di confidenza di Wilson per una proporzione binomiale.
-    p = k ./ n;
-    d = 1 + z^2 ./ n;
-    c = p + z^2 ./ (2*n);
-    s = z * sqrt( p.*(1-p)./n + z^2 ./ (4*n.^2) );
-    lo = max((c - s) ./ d, 0);
-    hi = min((c + s) ./ d, 1);
+function rs = streamMC(seed,idc,idp,idt)
+    rs = RandStream('mrg32k3a','Seed',seed);
+    rs.Substream = 1 + idt + 1000*idp + 1000000*idc;
+end
+
+function [lo,hi] = wilsonCI(k,n,z)
+    p = k./n; d = 1+z^2./n; c = p+z^2./(2*n);
+    s = z*sqrt(p.*(1-p)./n + z^2./(4*n.^2));
+    lo = max((c-s)./d,0); hi = min((c+s)./d,1);
 end
 
 function H = entropiaBinaria(p)
-% Entropia binaria H2(p), con H2(0) = H2(1) = 0.
-    p = min(max(p, 0), 1);
-    H = zeros(size(p));
-    m = (p > 0) & (p < 1);
+    p = min(max(p,0),1); H = zeros(size(p)); m = (p>0)&(p<1);
     H(m) = -p(m).*log2(p(m)) - (1-p(m)).*log2(1-p(m));
 end
 
 % =========================================================================
-% NOTE TECNICHE (aggiornate per la versione avionica)
+% NOTE TECNICHE - VERSIONE 2
 % =========================================================================
-% NOTA 1 - IL FLOOR NON E' UNA COSTANTE INDIPENDENTE DALLA SNR (a differenza
-%   di quanto si potrebbe pensare di primo acchito). Con sincronismo
-%   perfetto la BER scende verso zero senza limite al crescere della SNR.
-%   Un errore di tracking di 1 bin NON e' pero' un "colpo di sfortuna a
-%   costo fisso": verificato con una Monte Carlo dedicata a -41 dB,
-%   separando gli errori per esatto valore di offset,
-%      offset =  0  ->  BER ~ 0
-%      offset = +-1 ->  BER ~ 5-7 %
-%      offset = +-2 ->  BER ~ 85-100 %
-%   Il lobo laterale del kernel di compressione ha un guadagno di processo
-%   molto inferiore a quello del lobo principale: la stessa potenza covert
-%   che e' ampiamente sufficiente al bin corretto non lo e' affatto al bin
-%   adiacente. Questa degradazione condizionata dipende dalla SNR nominale
-%   (a una SNR molto piu' alta un errore di 1 bin costa assai meno, perche'
-%   il margine residuo assorbe la perdita), quindi il contributo del
-%   tracking alla BER totale non e' un floor piatto in senso stretto: resta
-%   basso vicino al punto di ancoraggio e cresce con continuita' scendendo
-%   in SNR, fondendosi gradualmente nel ginocchio del waterfall intrinseco.
-%   Il valore stampato a runtime come "floor stimato" (media dei punti a
-%   SNR piu' alta) va quindi letto come una stima locale al punto di
-%   ancoraggio, non come un limite fisico universale del ricevitore.
+% NOTA V2.1 - PERCHE' IL FILTRO ADATTATO CAMBIA TUTTO.
+%   Dopo il de-chirp il segnale utile e' (1/2) I_env(w) e^{i phi}: vive su
+%   ~sqrt(2 pi) sigma_bin campioni (poche centinaia su N = 16384). Il bin DC
+%   della FFT non pesata somma TUTTI gli N campioni, quindi raccoglie rumore
+%   sigma*sqrt(N/2) contro un segnale proporzionale a sum(I_env). Il
+%   rapporto fra le due deflessioni vale
+%       SNR_MF / SNR_flat = ||g|| * sqrt(N/2) / sum(g)
+%   che per una gaussiana di sigma_b bin su N campioni da' circa
+%       sqrt( N / (2 sqrt(pi) sigma_b) )
+%   cioe' ~10 dB per i parametri di questo scenario. Il codice lo verifica a
+%   runtime (variabile g_mf/g_flat) e la Campagna A lo valida confrontando la
+%   BER simulata con Q(||s||/sigma).
 %
-% NOTA 2 - CALIBRAZIONE DI sigma_bin_track: FARLA SEMPRE ALLA SNR VERA.
-%   Una prima calibrazione fatta osservando il floor a una SNR proxy molto
-%   alta (-20 dB, margine residuo enorme) dava floor ~3.5e-3 per
-%   sigma_bin_track = 0.5, un valore rassicurante ma fuorviante: applicato
-%   alla SNR di ancoraggio reale (-41 dB), lo stesso sigma_bin_track produce
-%   un floor quasi un ordine di grandezza piu' alto (~2.3e-2, verificato),
-%   perche' a -41 dB il margine non basta ad assorbire la perdita anche a
-%   soli +/-1 bin (BER condizionata 5-7%, non <1% come a -20 dB). La regola
-%   corretta e' quindi: CALIBRARE sigma_bin_track CON UNA MONTE CARLO
-%   DEDICATA VALUTATA ESATTAMENTE ALLA SNR DI ANCORAGGIO DI PROGETTO, mai a
-%   una SNR proxy piu' comoda. Con questa correzione, sigma_bin_track = 0.20
-%   da' un floor a -41 dB di ~7*10^-4, compatibile con un residuo di
-%   tracking Doppler di poco piu' di 1 kHz (vedi sigma_track_Hz stampato in
-%   Fase 4) - una specifica plausibile per un oscillatore/GPS di bordo
-%   classe CubeSat dopo correzione da effemeridi. E' un parametro di
-%   progetto: aumentarlo modella un tracking peggiore, ma va sempre
-%   ricontrollato alla SNR operativa vera, non a una SNR comoda per il test.
+% NOTA V2.2 - PERCHE' LA SOGLIA BER = 1e-3 ERA LA METRICA SBAGLIATA.
+%   Un canale covert opera per costruzione a SNR bassa: il punto operativo
+%   ottimo sta a BER grezza dell'ordine di 0.2-0.3, non 1e-3, e l'affidabilita'
+%   si recupera con codifica a rate basso. Valutare (1-BER)^L su frame non
+%   codificati e' quindi una metrica priva di significato in questo regime, e
+%   produceva goodput identicamente nullo. In v2 la figura di merito e' la
+%   capacita' 1 - H2(BER) integrata sui simboli del passaggio; BER_soglia
+%   resta solo come diagnostica.
+%   AVVERTENZA STATISTICA: per misurare capacita' dell'ordine di 1e-3
+%   bit/simbolo servirebbero ~1e6 bit per punto. Con Nbit_frame*N_MC bit per
+%   epoca l'intervallo di Wilson su BER ha semiampiezza ~1.96*sqrt(0.25/n):
+%   se il punto operativo finisce a BER ~0.49, la capacita' misurata NON e'
+%   distinguibile da zero e va riportata come limite superiore, non come
+%   risultato. Il sweep di progetto serve anche a evitare quel regime.
 %
-% NOTA 3 - GUADAGNO D'ANTENNA: MODELLO gaussianAntenna DEL TOOLBOX.
-%   G_tx e G_rx usano ora la STESSA formula documentata per l'oggetto
-%   gaussianAntenna del Satellite Communications Toolbox (boresightGain =
-%   ApertureEfficiency*(pi*D/lambda)^2), con ApertureEfficiency = 0.65, il
-%   default che il toolbox stesso assegna quando non specificato altrimenti
-%   (vedi documentazione di transmitter/gaussianAntenna). Sostituisce due
-%   problemi della versione precedente: (1) G_tx = 32/theta_div^2 legava il
-%   guadagno Tx a una divergenza (8 urad) scelta indipendentemente
-%   dall'apertura D_tx, un rischio di incoerenza fisica fra i due; (2) G_rx
-%   al limite di diffrazione puro assumeva implicitamente un'efficienza di
-%   apertura del 100%, non realistica. Impatto numerico verificato: G_tx
-%   aumenta di +8.6 dB, G_rx diminuisce di -1.9 dB (netto +6.7 dB su
-%   P_rx_ideal_t, quindi su Fig. 1b e sul margine fotonico di Fase 4).
-%   NESSUN impatto invece su BER/throughput (Fig. 2-4): in Campagna B la
-%   SNR efficace usa il RAPPORTO P_rx_ideal_t(t)/P_rx_ideal_t(crossing), in
-%   cui G_tx*G_rx (costanti lungo il passaggio) si cancellano esattamente;
-%   in Campagna A la covertness e' definita relativamente al fondo
-%   classico, indipendente dalla potenza assoluta. theta_div_beam resta un
-%   parametro indipendente, usato SOLO nella formula di fading di
-%   puntamento exp(-8*(theta_err/theta_div)^2) (una relazione della
-%   letteratura FSO, concettualmente diversa dal beamwidth a -3dB
-%   dell'antenna: quest'ultimo e' stampato a runtime in Fase 3 solo per
-%   confronto, le due grandezze angolari non vanno confuse) - resta quindi
-%   ancora da verificare in letteratura, come gia' segnalato.
+% NOTA V2.3 - STRUTTURA DEL PROBLEMA DI PROGETTO.
+%   Bob: BER = Q(d), d = ||s||/sigma, C(d) = 1 - H2(Q(d)).
+%   Eve-A: deflessione per simbolo d^2/sqrt(2N); su M simboli sqrt(M) d^2/sqrt(2N).
+%   Eve-B: deflessione per simbolo d^2/sqrt(2);  su M simboli sqrt(M) d^2/sqrt(2).
+%   Massimizzando M*C(d) sotto sqrt(M) d^2/sqrt(2N) <= thr e usando
+%   C(d) ~ d^2/(pi ln2) a piccolo d, si trova che il volume covert va come
+%   1/d^2 finche' Eve resta il vincolo attivo: conviene quindi d PICCOLO e
+%   M grande, e l'ottimo cade esattamente dove Eve raggiunge la soglia a fine
+%   passaggio, cioe' d_opt = (2 N thr^2 / M_pass)^(1/4). Il volume covert
+%   corrispondente scala come sqrt(2 N M_pass), cioe' come la radice del
+%   numero totale di campioni: e' la legge della radice quadrata delle
+%   comunicazioni covert, qui ottenuta come risultato e non assunta.
 %
-% NOTA 3bis - DERIVAZIONE FISICA DI c_chirp, offset, sigma_doppler E DELLO
-%   SHIFT DOPPLER (sostituisce K_doppler_grafico).
-%   Nel benchmark, c_chirp/offset/sigma_doppler vivevano nel dominio
-%   normalizzato omega in [-1,1] senza un aggancio esplicito a B_IF: la
-%   loro banda FISICA (Hz) e' automaticamente proporzionale a B_IF (1
-%   unita' di omega = B_IF/2 Hz), quindi cambiando B_IF da 16.38 GHz a
-%   100 MHz il loro significato fisico e' cambiato di un fattore ~164
-%   SENZA che nessuno lo decidesse (verificato: la stessa sigma_doppler
-%   = 0.15 rappresentava 1229 MHz di linewidth nel benchmark e ne
-%   rappresenta solo 7.5 MHz qui). Qui questo e' reso un aggancio
-%   esplicito e dichiarato: c_chirp e offset sono derivati da una frazione
-%   di banda occupata scelta di proposito (frac_BW_chirp = 7.32% di B_IF,
-%   Fase 4), e sigma_doppler resta definito come frazione fissa della
-%   semi-banda B_IF/2 per costruzione, non come valore assoluto ereditato.
-%   La costante K_doppler_grafico (fattore di scala grafico, dichiarato
-%   come tale fin dal modello originale) e' stata rimossa e sostituita da
-%   shiftResiduoDoppler(): lo shift usato per ricentrare lo spettro non
-%   e' piu' proporzionale al Doppler assoluto (v_rel/c, che a 26.7 GHz non
-%   potrebbe comunque stare in un IF da 100 MHz - vedi la dichiarazione di
-%   architettura in Fase 4) ma al residuo Doppler ACCUMULATO IN UN SIMBOLO
-%   per effetto del solo Doppler-rate (dfD_dt_t, gia' calcolato dalla
-%   traiettoria SGP4/J2 reale in Fase 2): shift = dfD_dt*T_sym/(B_IF/2).
-%   Conseguenza verificata: questo residuo e' minuscolo ovunque nel
-%   passaggio (~0.0022 al crossing, dove il Doppler-rate e' massimo a
-%   671 MHz/s; molto meno altrove), contro shift fino a ~0.3-0.4 del vecchio
-%   schema empirico. Significa che, grazie alla pre-compensazione Doppler
-%   grossolana dichiarata in Fase 4, la perdita di campioni per
-%   interpolazione fuori dominio in operatoreShift() diventa trascurabile
-%   ovunque nel passaggio (prima non lo era, ed era un fattore di
-%   discrepanza fra Campagna A e B): la Campagna B dovrebbe quindi
-%   allinearsi alla Campagna A in modo piu' pulito lungo tutto il
-%   passaggio, non solo al crossing.
+% NOTA V2.4 - OD E CALIBRAZIONE: DUE PARAMETRI CHE PRIMA ERANO NASCOSTI.
+%   (a) OD. Normalizzare S_cl a RMS 1 e derivare sigma dal conteggio fotonico
+%       equivale ad assumere modulazione al 100% del fascio di sonda. Per un
+%       singolo ione la modulazione frazionaria e' limitata da
+%       sigma_abs/A_fascio, con sigma_abs = 3 lambda^2/(2 pi). d e' LINEARE in
+%       OD, quindi la capacita' e' molto sensibile alla qualita' del fuoco
+%       sullo ione: e' il parametro sperimentale piu' critico dopo Delta_t.
+%   (b) eps_sub. La v1 sottraeva S_cl esattamente noto. In v2 l'errore e'
+%       congelato sul frame (e' una calibrazione) e produce un BIAS. Con
+%       errore per bin indipendente il bias media su ~sqrt(2 pi) sigma_bin
+%       campioni e il margine risulta ampio; un errore STRUTTURATO (deriva
+%       della trappola, moto secolare residuo, deriva del LO) proietta molto
+%       piu' efficacemente sul template e richiede uno studio separato. Va
+%       dichiarato come limite del modello.
 %
-% NOTA 3ter - IDENTITA' FISICA DEL FONDO CLASSICO (sigma_doppler).
-%   Il fondo classico non e' un inviluppo di comodo: e' il canale classico
-%   legittimo co-locato sotto cui il segnale covert si nasconde (scenario
-%   LPI standard), identificato con la riga di emissione dello ione 27Al+
-%   intrappolato, allargata per effetto Doppler termico dal moto residuo
-%   dello ione. sigma_doppler e' quindi DERIVATO, non assunto:
-%       sigma_nu = nu0*sqrt(k_B*T_ion/(m*c^2))
-%   Con T_ion = 13.02 mK -> sigma = 7.49 MHz, FWHM = 17.65 MHz, che nel
-%   dominio normalizzato a B_IF = 100 MHz da' sigma_doppler = 0.150 (lo
-%   stesso valore usato in tutte le campagne gia' validate: la derivazione
-%   fisica non invalida i risultati precedenti, li giustifica a posteriori).
+% NOTA V2.5 - IL RISULTATO ONESTO SULLA COVERTNESS.
+%   delta_B / delta_A = sqrt(N) esattamente. Bob e Eve-B usano lo STESSO
+%   filtro: l'unica cosa che Bob ha in piu' e' la conoscenza di phi, che
+%   serve a leggere il bit, non a rilevare la trasmissione. Quindi ogni volta
+%   che Bob decodifica in modo affidabile, Eve-B rileva. La covertness di
+%   questo schema NON puo' poggiare sull'ignoranza di C da parte di Eve: C
+%   dipende solo da Delta_t, m e Omega, e comunque e' stimabile dallo spettro
+%   senza conoscere il bit (autocorrelazione, distribuzione di Wigner), con
+%   uno spazio di ricerca monodimensionale.
+%   L'argomento difendibile e' quello geometrico di 4Q.12: con divergenza di
+%   8 urad la frazione di angolo solido illuminata e' theta_div^2/4 ~ 1.6e-11.
+%   Eve deve stare dentro il fascio. Questo va presentato come il meccanismo
+%   di sicurezza primario, e la statistica di Eve-A come difesa di secondo
+%   livello contro un intercettatore che si trovi dentro il fascio ma non
+%   sappia che cosa cercare.
 %
-%   CORREZIONE DI COERENZA: nella versione precedente sigma_doppler era
-%   fissato come frazione di B_IF, per cui cambiando B_IF cambiava
-%   silenziosamente la temperatura implicita dello ione - fisicamente
-%   rovesciato (la temperatura e' una proprieta' della trappola, non del
-%   ricevitore). Ora il verso e' corretto: si fissa T_ion, e sigma_doppler
-%   normalizzato ne discende insieme a B_IF.
-%
-%   TRE CONDIZIONI DI VALIDITA', tutte verificate numericamente:
-%   (a) Larghezza naturale della transizione di intercombinazione
-%       1S0-3P1 dell'Al+ (sub-kHz) trascurabile rispetto ai MHz di
-%       allargamento Doppler -> il profilo di Voigt degenera in gaussiano
-%       puro, coerente con la forma exp(-x^2/(2*sigma^2)) usata nel codice.
-%   (b) Regime di sideband NON risolte: FWHM Doppler (17.6 MHz) >> frequenza
-%       secolare di trappola tipica (0.5-5 MHz), rapporto 3.5-35. Il
-%       profilo gaussiano continuo e' quindi valido; per uno ione piu'
-%       freddo o una trappola piu' rigida si passerebbe a sideband risolte
-%       e la gaussiana non descriverebbe piu' lo spettro (il codice
-%       verifica ed emette un warning a runtime in Fase 4).
-%   (c) Contenimento spettrale: il chirp covert occupa 7.32 MHz, contro
-%       una FWHM del fondo di 17.65 MHz (rapporto 0.41). Il segnale covert
-%       e' quindi interamente contenuto nella riga di copertura, condizione
-%       necessaria dello scenario LPI: se sbordasse, sarebbe rilevabile
-%       fuori banda indipendentemente da quanto sia debole.
-%
-% NOTA 4 - PERCHE' LA FRONTIERA COVERTNESS-RATE NON INCLUDE IL FLOOR.
-%   La frontiera (Fase 7, Fig. 4) resta calcolata a sincronismo ideale: e'
-%   un limite fisico del canale (quanti campioni/simbolo servono per un
-%   dato BER obiettivo), non del ricevitore. Un secondo limite, dettato dal
-%   floor di tracking, si aggiunge in serie: nessun aumento di N o di
-%   potenza covert puo' scendere sotto BER_floor_stimato. In tesi conviene
-%   presentare i due limiti separatamente, come qui.
-%
-% NOTA 5 - COSTO DI RIVELAZIONE PER EVE E BANDA IF.
-%   Il numero di campioni che Eve deve accumulare per un rivelatore
-%   d'energia dipende solo dalla SNR covert (N_eve = 1/eta^2), non dalla
-%   banda. Il TEMPO che le serve, invece, e' N_eve/B_IF: con B_IF = 100 MHz
-%   (invece di 16.38 GHz da banco) il tempo di rivelazione cresce di un
-%   fattore ~164, un vantaggio addizionale di covertness "gratuito" che
-%   discende direttamente dalla scelta di una banda IF realistica da
-%   SmallSat.
+% NOTA V2.6 - VINCOLI SU Delta_t, ORA TRE.
+%   (a) NYQUIST sulla griglia spettrale (verificato a runtime).
+%   (b) COERENZA della sovrapposizione (non verificabile dal simulatore).
+%   (c) LARGHEZZA NATURALE: il passo delle frange del chirp al bordo
+%       dell'inviluppo vale 2 pi/(2 C dw_bordo); se scende sotto Gamma0 le
+%       frange vengono lavate dalla lorentziana della transizione. Calcolato
+%       a runtime in 4Q.8.
+%   In piu', il meccanismo stesso di Delta_t richiede evoluzione LIBERA:
+%   in trappola armonica lo stato coerente ruota nello spazio delle fasi e
+%   non accumula la fase quadratica in p. Il codice stampa l'escursione
+%   spaziale dei due rami durante Delta_t come verifica di fattibilita'.
 % =========================================================================
