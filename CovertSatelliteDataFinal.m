@@ -88,7 +88,8 @@ altitude_orbit = 800e3;  sma = R_earth + altitude_orbit;
 ecc = 0.0001; incl_deg = 60; argPeri_deg = 0; J2 = 1.08263e-3;
 mu_n = sqrt(mu_earth/sma^3);
 raan_rate = -1.5*mu_n*J2*(R_earth/(sma*(1-ecc^2)))^2*cosd(incl_deg);
-dRAAN_deg = acosd((cosd(60)-cosd(incl_deg)^2)/sind(incl_deg)^2);
+angolo_piani_deg = 60;   % angle between the two planes
+dRAAN_deg = acosd((cosd(angolo_piani_deg)-cosd(incl_deg)^2)/sind(incl_deg)^2);
 raan_Alice = 0; raan_Bob = dRAAN_deg;
 T_orbit = 2*pi/mu_n; incl_rad = deg2rad(incl_deg);
 
