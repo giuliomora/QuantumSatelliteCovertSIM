@@ -1,5 +1,5 @@
 % =========================================================================
-% QUANTUM-COVERT INTER-SATELLITE LINK SIMULATOR
+% QUANTUM-COVERT INTER-SATELLITE LINK SIMULATOR  (CovertSimFix: see Notes 12-16)
 % Spectral fringe encoding on the quantum Doppler effect, matched-filter
 % reception, and covert-capacity assessment over a LEO-LEO pass.
 %
@@ -31,7 +31,7 @@
 % DECLARED INPUTS DESCRIBING THE SOURCE (Section 4)
 %   Delta    velocity spread of the two momentum packets, in units of v/c
 %   Delta_x  spatial separation between the branches
-%   OD       root-mean-square fractional modulation written on the probe
+%   OD       rms optical depth of the imprint on the probe (Note 12)
 %
 % MODEL CHAIN (everything below follows from the declared inputs)
 %   1. The emitter is prepared in a coherent superposition of two momentum
@@ -58,6 +58,45 @@
 %   7. Averaged over equiprobable bits the interference term cancels,
 %      cos(x) + cos(x+pi) = 0, and only S_class survives. This is checked
 %      at run time in Section 4.12.
+%
+% NOTE 11 - THE FRINGE PITCH AS A KEY, AND WHY IT IS NEEDED.
+%   Note 8 states the negative result: kappa depends only on atomic
+%   constants and the branch separation, it is estimable from the received
+%   spectrum by autocorrelation over a one-dimensional search space, and
+%   under the Kerckhoffs assumption it must therefore be handed to the
+%   adversary. The deeper reading is that the scheme as first written has NO
+%   secret at all, and the covert-communication literature is explicit that
+%   a pre-shared secret is a condition of possibility, not an optional
+%   extra: O(sqrt(n)) covert bits over n channel uses require a key of
+%   O(sqrt(n) log n) bits [Bash-Goeckel-Towsley 2013; Bloch 2016].
+%   The remedy implemented here is to make Delta_x, and hence kappa, a KEYED
+%   SEQUENCE rather than a constant of the apparatus: it is redrawn every
+%   symbol from a stream cipher seeded with a pre-shared key. This is
+%   frequency hopping moved from the carrier to the fringe pitch, and it is
+%   the direct analogue of hiding the transmission slot from a warden who
+%   does not know when Alice transmits [Bash-Goeckel-Towsley 2014].
+%   Bob is unaffected: he knows the sequence and rebuilds exp(+i kappa_n dw)
+%   per symbol, so his deflection is unchanged. A THIRD adversary appears -
+%   Eve-C, who knows the scheme but not the key - and she must test all M
+%   admissible pitches and combine them non-coherently, spreading her
+%   statistic over M cells instead of one:
+%       delta_C = d^2/sqrt(2 M) ,  between delta_B (M=1) and delta_A (M=N_env).
+%   Since the covert volume scales as sqrt(M_eff), the alphabet size is the
+%   single number that decides how much of the sqrt(N_env) advantage of Eve-B is
+%   taken back. The alphabet is BOUNDED, not assumed, by three ceilings
+%   evaluated in operatingPoint: Nyquist sampling of the fringe, clearance
+%   of the image peak, and the Doppler tracking residual. The third is the
+%   one that binds at the declared sigma_f = 1 kHz, which promotes the
+%   tracking residual from a link-budget quantity to a SECURITY parameter.
+%   Two honesties are required in the text. First, hopping does not defeat
+%   Eve-A and does not evade the square root law: it removes an unearned
+%   advantage, it does not buy a new one. Second, per-symbol hopping
+%   consumes log2(M) key bits per symbol, far above the O(sqrt(n) log n) the
+%   theory requires; with a stream cipher the pre-shared seed is small and
+%   the covertness becomes COMPUTATIONAL rather than information-theoretic.
+%   That assumption must be stated, not buried. Setting cfg.hopping = false
+%   restores the fixed-kappa baseline exactly, including the choice of
+%   optimisation target, so the two can be compared without re-deriving.
 %
 % REQUIRED TOOLBOXES
 %   Satellite Communications Toolbox (satelliteScenario, satellite, states)
@@ -326,9 +365,31 @@ cfg.theta = pi/4;
 cfg.Delta_x = 90e-9;
 cfg.kappa   = m_Al27*c_light*cfg.Delta_x/(hbar*Omega_rad);
 
+% --- 4.3b Fringe hopping: introducing an actual secret -------------------
+% A fixed Delta_x makes kappa a constant of the apparatus, and a constant of
+% the apparatus is not a secret (Note 8). With hopping enabled, Delta_x is
+% redrawn every symbol from a keyed pseudorandom sequence, so kappa_n is a
+% key variable. The sequence itself is not simulated: what matters to the
+% channel model is only the SIZE of the alphabet the adversary must search,
+% which operatingPoint bounds from the three ceilings below. Whether the
+% source can switch Delta_x within a symbol is an apparatus question and is
+% declared, exactly as Delta_x itself is - and it is a strictly weaker
+% assumption than the one already made, since setting phi per symbol already
+% demands programmable control of the preparation pulse.
+cfg.hopping       = true;   % false restores the fixed-kappa baseline exactly
+cfg.hopLossTol_dB = 1.0;    % loss budget fixing the tracking ceiling on kappa
+cfg.imageMargin   = 3.0;    % image peak must clear this many compressed peak
+                            % half-widths. Same guard factor and same width
+                            % definition as Sections 4.12 and 7.3, so the
+                            % bottom of the hopping alphabet coincides exactly
+                            % with the lower bound on Delta_x reported there.
+
 % --- 4.4 Imprint depth --------------------------------------------------
-% OD is the root-mean-square fractional modulation the emitter writes on the
-% probe beam. Declared, not designed: Section 7.2 sweeps it, so every result
+% OD is the root-mean-square, over the analysis band, of the OPTICAL DEPTH
+% profile the emitter imprints on the probe beam (Note 12). At the line peaks
+% the optical depth is several times OD, but the signal lives in the valley
+% between them, where the medium is optically thin and the linearised
+% (Beer-Lambert) imprint used here is exact to high accuracy. Declared, not designed: Section 7.2 sweeps it, so every result
 % can be read at whatever value a given platform actually delivers.
 cfg.OD = 0.8;
 
@@ -348,7 +409,10 @@ cfg.sigma_f_track = 1e3;   % residual Doppler offset error, 1-sigma, in Hz
 % Full-well capacity assumed for a spectral bin of the receiving array. It is
 % not used to model the detector, only to make the no-saturation assumption of
 % Section 4.8 checkable rather than tacit.
-cfg.wellDepth = 1e6;       % electrons per bin, declared
+cfg.wellDepth = 1e6;       % photoelectrons per bin per symbol the receiver chain
+                           % handles linearly (dynamic range), declared; with
+                           % heterodyne detection this is a photodiode/ADC
+                           % dynamic-range figure, not a pixel well depth
 
 cfg.N = 2^14;
 SNR_thr_Eve = 3;           % assumed detection threshold for the eavesdropper
@@ -377,13 +441,25 @@ t_ep     = t_sec(idx_ep);
 dt_ep    = (T_window/N_epochs)*ones(1,N_epochs);
 avail_ep = double(link_available(idx_ep));
 
+% DESIGN POWER (Note 14). The optimisation uses the received power scaled by
+% the pass-mean pointing loss, so that the operating point is chosen for the
+% power the Monte Carlo campaigns actually deliver. Using the unfaded power,
+% as previous versions did, placed the design about 4 dB too optimistic and
+% made design and Monte Carlo volumes not comparable. The mean of the loss is
+% the right average for the capacity and the per-symbol deflections in the
+% small-deflection regime, where both are linear in received power.
+L_point_mean = mean(Lp_t);
+fprintf('Design power includes the pass-mean pointing loss: %.2f dB\n', -10*log10(L_point_mean));
+
 par = struct('theta',cfg.theta,'Omega_rad',Omega_rad, ...
              'eps_theta_probe',cfg.eps_theta_probe, ...
              'f0',f0_optical,'N',cfg.N,'Delta',cfg.Delta,'kappa',cfg.kappa, ...
              'OD',cfg.OD,'Gamma0',Gamma0_Hz, ...
              'F_excess',cfg.F_excess,'E_photon',E_photon,'eta_det',eta_det, ...
-             'P_ep',P_rx_ideal_t(idx_ep),'dt_ep',dt_ep.*avail_ep, ...
-             'SNR_thr',SNR_thr_Eve,'m',m_Al27,'c',c_light,'hbar',hbar);
+             'P_ep',P_rx_ideal_t(idx_ep)*L_point_mean,'dt_ep',dt_ep.*avail_ep, ...
+             'SNR_thr',SNR_thr_Eve,'m',m_Al27,'c',c_light,'hbar',hbar, ...
+             'hopping',cfg.hopping,'sigma_f',cfg.sigma_f_track, ...
+             'hopLossTol_dB',cfg.hopLossTol_dB,'imageMargin',cfg.imageMargin);
 
 % Only the packet separation is optimised. It is a property of the SIGNAL,
 % not of the apparatus: it sets the spectral width of the line and hence the
@@ -394,26 +470,45 @@ sep_vec = 4.0:0.05:9.5;
 nSep = numel(sep_vec);
 B_naive = zeros(1,nSep);   % covert volume against the energy detector
 B_keyed = zeros(1,nSep);   % covert volume against the key-aware detector
+B_hop   = zeros(1,nSep);   % covert volume against the scheme-aware detector
 B_noEve = zeros(1,nSep);   % volume with no eavesdropper present
 for k = 1:nSep
     o = operatingPoint(sep_vec(k), par);
     if o.nyquistPhase < pi                 % reject an undersampled fringe
         B_naive(k) = o.volume_naive;
         B_keyed(k) = o.volume_keyed;
+        B_hop(k)   = o.volume_hopped;
         B_noEve(k) = o.volume_noEve;
     end
 end
-[B_best, k_best] = max(B_naive);
+% The design must be optimised against the STRONGEST adversary it claims to
+% defend against, and hopping changes who that is. Without hopping the only
+% defensible model is Eve-A, because Eve-B defeats the channel outright and
+% optimising against her is meaningless. With hopping the binding adversary
+% is Eve-C, who is strictly more sensitive than Eve-A (M < N_env) and strictly
+% less than Eve-B (M > 1), so she becomes the target.
+if cfg.hopping
+    [B_best, k_best] = max(B_hop);
+    targetName = 'Eve-C (scheme-aware, key-unaware)';
+else
+    [B_best, k_best] = max(B_naive);
+    targetName = 'Eve-A (energy detector)';
+end
 if B_best <= 0
     error('No feasible separation: the fringe is undersampled over the whole sweep.');
 end
 cfg.sep_over_Delta = sep_vec(k_best);
 opt = operatingPoint(cfg.sep_over_Delta, par);
 
+fprintf('Optimisation target: %s\n', targetName);
 fprintf('Optimal separation = %.2f Delta -> covert volume = %.3e bit\n', ...
         cfg.sep_over_Delta, B_best);
 fprintf('  same point, no eavesdropper        = %.3e bit\n', opt.volume_noEve);
+fprintf('  same point, energy detector Eve-A  = %.3e bit\n', opt.volume_naive);
+fprintf('  same point, scheme-aware Eve-C     = %.3e bit\n', opt.volume_hopped);
 fprintf('  same point, key-aware eavesdropper = %.3e bit\n', opt.volume_keyed);
+fprintf('  hopping alphabet: %d integer fringe counts (F in [%d, %.0f]) -> %.1f resolvable pitches\n', ...
+        opt.M_alpha, opt.F_min, min(opt.F_nyq,opt.F_trk), opt.M_res);
 % This deflection is the DESIGN value: it uses the unfaded received power,
 % because the optimisation must not depend on a particular pointing
 % realisation. The Monte Carlo campaigns apply pointing loss and therefore
@@ -429,7 +524,11 @@ fprintf('  median deflection d = %.3f (design, unfaded) -> raw BER = %.3f, capac
 % The numerical sweep must land near it; a large disagreement means the
 % truncation or the deflection is wrong, not that the sweep found something
 % clever.
-d_opt = (2*cfg.N*SNR_thr_Eve^2/opt.M_pass)^(1/4);
+% M_eff is the number of cells the TARGETED adversary must collect over: N
+% for the energy detector, M for the scheme-aware one. The closed form is
+% otherwise unchanged, which is the point - hopping does not alter the
+% structure of the optimisation, only the constant inside it.
+d_opt = (2*opt.M_eff_target*SNR_thr_Eve^2/opt.M_pass)^(1/4);
 fprintf('  check: analytic covert optimum d_opt = %.3f, sweep sits at %.3f (ratio %.2f)\n', ...
         d_opt, median(opt.d_ep), median(opt.d_ep)/d_opt);
 % The optimum must be interior. If it sits on an end of sep_vec the sweep is
@@ -444,12 +543,14 @@ end
 % the eavesdropper never reaches threshold and the covert framing is inert:
 % the optimiser is then maximising plain capacity and the Eve model has no
 % influence on the design.
-if opt.volume_naive >= 0.999*opt.volume_noEve
+B_target_now = opt.volume_naive;
+if cfg.hopping, B_target_now = opt.volume_hopped; end
+if B_target_now >= 0.999*opt.volume_noEve
     fprintf('  check: BINDING CONSTRAINT IS PASS DURATION - the eavesdropper never reaches threshold,\n');
     fprintf('         so the covert model is inert at this operating point.\n');
 else
     fprintf('  check: binding constraint is DETECTION - %.1f %% of the transmissible volume is usable\n', ...
-            100*opt.volume_naive/opt.volume_noEve);
+            100*B_target_now/opt.volume_noEve);
 end
 
 %% ------------------------------------------------------------------------
@@ -511,6 +612,46 @@ fprintf('Ceiling 2 (natural linewidth): fringe spacing %.3f MHz vs Gamma0 = %d H
         fringeSpacing_Hz/1e6, Gamma0_Hz, fringeSpacing_Hz/Gamma0_Hz);
 fprintf('Ceiling 3 (coherence time of the superposition) is experimental and outside this model.\n');
 
+% --- Hopping alphabet ----------------------------------------------------
+% The three ceilings that bound the keyed alphabet, reported side by side so
+% it is visible WHICH one binds. Reporting only the resulting M would hide
+% the fact that the binding constraint is the tracking residual and not the
+% physics of the fringe, which is the actionable part of the result.
+fprintf('\n--- 4.7b Fringe-hopping alphabet ---\n');
+if cfg.hopping
+    fprintf('Hopping ENABLED: kappa redrawn per symbol from the keyed sequence.\n');
+else
+    fprintf('Hopping DISABLED: fixed-kappa baseline, Eve-C degenerates to Eve-B.\n');
+end
+fprintf('Declared operating point sits at F = %.1f fringes in the band\n', opt.F_now);
+fprintf('  ceiling (a) Nyquist                  : F <= %.0f\n', opt.F_nyq);
+fprintf('  ceiling (b) image clearance          : F >= %d (compressed half-width %.1f bins)\n', ...
+        opt.F_min, opt.halfW);
+fprintf('  ceiling (c) tracking residual %.0f Hz  : F <= %.0f (budget %.1f dB)\n', ...
+        cfg.sigma_f_track, opt.F_trk, cfg.hopLossTol_dB);
+if opt.F_trk < opt.F_nyq
+    fprintf('  BINDING CEILING: the Doppler tracking residual, not the fringe physics.\n');
+    fprintf('    tightening sigma_f to %.0f Hz would open the full Nyquist alphabet\n', ...
+            cfg.sigma_f_track*opt.F_trk/opt.F_nyq);
+else
+    fprintf('  BINDING CEILING: Nyquist sampling of the fringe.\n');
+end
+fprintf('Integer fringe counts in range: %d\n', opt.M_alpha);
+fprintf('Resolvable pitches under the envelope (Note 12): M = %.1f\n', opt.M_res);
+fprintf('  template correlation for adjacent counts %.4f, for 10 counts %.3f, for 30 counts %.3f\n', ...
+        exp(-(opt.rhoA)^2/2), exp(-(10*opt.rhoA)^2/2), exp(-(30*opt.rhoA)^2/2));
+fprintf('  -> Eve-C spread over %.1f cells (Eve-A: %.0f, Eve-B: 1)\n', opt.M_eff, opt.N_env);
+fprintf('  envelope occupancy N_env = %.0f samples: upper bound on the cells ANY keyed scheme can create\n', ...
+        opt.N_env);
+if cfg.hopping
+    Mres_nyq = resolvablePitches(floor(opt.F_nyq)-opt.F_min+1, opt.rhoA);
+    fprintf('  with the full Nyquist range the resolvable alphabet would be %.1f (x%.2f in M, x%.2f in volume)\n', ...
+            Mres_nyq, Mres_nyq/opt.M_res, sqrt(Mres_nyq/opt.M_res));
+end
+if opt.F_now < opt.F_min || opt.F_now > min(opt.F_nyq,opt.F_trk)
+    warning('The declared Delta_x lies outside the admissible hopping alphabet.');
+end
+
 fprintf('Fringe-coefficient error: eps_kappa = %.1e -> peak displacement = %.3f bins\n', ...
         cfg.eps_kappa, cfg.eps_kappa*cfg.kappa*cfg.B_IF);
 
@@ -537,21 +678,50 @@ fprintf('Tracking offset: sigma_f = %.0f Hz -> fringe phase error %.4f rad -> %.
         -20*log10(exp(-cfg.sigma_phi_track^2/2)));
 fprintf('  offset tolerated for 1 dB of loss: %.1f kHz\n', ...
         sqrt(2*log(10^(1/20)))/(cfg.kappa*2*pi)/1e3);
+% The same offset on the FINEST pitch of the hopping alphabet, which is where
+% the tracking ceiling sits by construction (loss equal to the budget).
+F_top = floor(min(opt.F_nyq, opt.F_trk));
+fprintf('  same offset on the finest admissible pitch (F = %d): %.3f dB loss (budget %.1f dB)\n', ...
+        F_top, -20*log10(exp(-(2*pi*cfg.sigma_f_track*F_top/cfg.B_IF)^2/2)), cfg.hopLossTol_dB);
+
+% --- Residual Doppler RATE: tolerance, computed rather than assumed ---------
+% The compensation leaves an offset AND a rate. A residual rate r sweeps the
+% line by r*T_sym during one spectral reading; averaging cos(kappa*dw + phase)
+% over a linear phase sweep of total width 2*pi*kappa*r*T_sym scales the
+% fringe by sinc: sin(x)/x with x = pi*kappa*r*T_sym. The finest admissible
+% pitch is the most sensitive one, so the tolerance is evaluated there, with
+% the same loss budget used for the offset ceiling. This is a REQUIREMENT on
+% the compensation, not a modelled residual: no value of r is declared, and the
+% text must compare the tolerance with the rate residual a real tracker leaves.
+lossTarget = 10^(-cfg.hopLossTol_dB/20);
+x_tol   = fzero(@(x) sin(x)./x - lossTarget, [1e-6, pi-1e-6]);
+kap_top = F_top/cfg.B_IF;
+r_tol_top  = x_tol/(pi*kap_top*cfg.T_sym);
+r_tol_decl = x_tol/(pi*cfg.kappa*cfg.T_sym);
+cfg.rateTol_Hzs = r_tol_top;
+fprintf('Tracking rate: tolerated residual for %.1f dB loss = %.2f MHz/s on the finest pitch (%.1f MHz/s on the declared one)\n', ...
+        cfg.hopLossTol_dB, r_tol_top/1e6, r_tol_decl/1e6);
+fprintf('  against a raw rate of %.1f MHz/s at closest approach: the compensation must remove %.2f %% of it\n', ...
+        abs(dfD_dt_t(idx_cross))/1e6, 100*(1 - r_tol_top/abs(dfD_dt_t(idx_cross))));
+fprintf('  uncompensated, the line would move %.0f kHz within one symbol against a finest pitch of %.1f kHz\n', ...
+        abs(dfD_dt_t(idx_cross))*cfg.T_sym/1e3, cfg.B_IF/F_top/1e3);
 
 % --- Verification of the noise model -------------------------------------
 % sigma is recomputed here from the photon count by an independent route, and
 % its scaling with range is checked: the collected power falls as 1/d^2 and
 % the relative shot noise therefore rises linearly with range.
-n_bin_chk = (P_rx_ideal_t(idx_cross)*cfg.T_sym/E_photon)*eta_det/cfg.N;
-sig_chk   = cfg.F_excess/sqrt(n_bin_chk);
-fprintf('  check: photons per bin at closest approach = %.2e -> sigma = %.2e (reported %.2e)\n', ...
-        n_bin_chk, sig_chk, min(opt.sigma_ep));
+% The design noise includes the pass-mean pointing loss (Note 14), so the
+% independent recomputation must include it as well.
+n_bin_chk = (P_rx_ideal_t(idx_cross)*cfg.T_sym/E_photon)*eta_det/cfg.N;   % unfaded
+sig_chk   = cfg.F_excess/sqrt(n_bin_chk*L_point_mean);
+fprintf('  check: photons per bin at closest approach = %.2e unfaded, %.2e with mean fading -> sigma = %.2e (reported %.2e)\n', ...
+        n_bin_chk, n_bin_chk*L_point_mean, sig_chk, min(opt.sigma_ep));
 [~,i_far] = max(d_t(idx_ep));
 fprintf('  check: sigma edge/closest = %.2f against range ratio %.2f (shot noise scales as range)\n', ...
         max(opt.sigma_ep)/min(opt.sigma_ep), d_t(idx_ep(i_far))/d_min);
 % Photons per symbol, the quantity an experimentalist recognises.
-fprintf('  photons per symbol at closest approach: %.2e over %d bins\n', ...
-        n_bin_chk*cfg.N, cfg.N);
+fprintf('  photons per symbol at closest approach: %.2e unfaded, %.2e with mean fading, over %d bins\n', ...
+        n_bin_chk*cfg.N, n_bin_chk*L_point_mean*cfg.N, cfg.N);
 % DECLARED ASSUMPTION ON THE RECEIVER. At this flux the excess-noise factor
 % of 3 is conservative rather than generous: shot noise at 0.6 mW received
 % corresponds to a relative intensity noise of -146 dBc/Hz, which sits above
@@ -575,35 +745,38 @@ fprintf('  photons per symbol at closest approach: %.2e over %d bins\n', ...
 % absorb, and the price that absorbing it by attenuation alone would carry.
 n_bin_max = (max(P_rx_ideal_t)*cfg.T_sym/E_photon)*eta_det/cfg.N;
 satRatio  = n_bin_max/cfg.wellDepth;
-fprintf('  saturation: %.2e electrons per bin per symbol vs declared well depth %.1e -> x%.0f\n', ...
+fprintf('  dynamic range: %.2e photoelectrons per bin per symbol vs declared linear range %.1e -> x%.0f\n', ...
         n_bin_max, cfg.wellDepth, satRatio);
 if satRatio > 1
     fprintf('              absorbing it needs %.1f dB of attenuation, or an integration cut to %.2f %% of the symbol\n', ...
             10*log10(satRatio), 100/satRatio);
     fprintf('              if absorbed by attenuation alone the deflection would fall by x%.1f\n', ...
             sqrt(satRatio));
-    warning(['Flux per bin exceeds the declared well depth by a factor %.0f: the ' ...
+    warning(['Flux per bin exceeds the declared linear range by a factor %.0f: the ' ...
              'no-saturation assumption is not self-evident and must be stated in the text.'], satRatio);
 else
-    fprintf('              the array is not saturated at the declared well depth; the assumption is inert here\n');
+    fprintf('              the receiver stays within the declared linear range; the assumption is inert here\n');
 end
 
 %% ------------------------------------------------------------------------
 % 4.9 Adversary models
 % -------------------------------------------------------------------------
-% Two adversaries are modelled. Both are assumed to receive the signal with
+% Three adversaries are modelled. All are assumed to receive the signal with
 % the same signal-to-noise ratio as the intended receiver, which is the
 % conservative choice: Section 4.11 argues they must in fact be inside the
 % beam to receive anything at all.
 %
-% Eve-A, KEY-UNAWARE. She knows the classical profile, subtracts it, and sums
-%   the residual energy over the band. Under the null hypothesis the residual
-%   is N bins of variance sigma^2, so the summed energy has mean N sigma^2 and
-%   standard deviation sigma^2 sqrt(2N). The signal adds sum(tmpl^2) =
-%   d^2 sigma^2. Hence
-%       delta_A = d^2 sigma^2 / (sigma^2 sqrt(2N)) = d^2/sqrt(2N).
-%   She pays the full bandwidth in noise for a signal that occupies a small
-%   part of it, because without kappa she cannot compress it.
+% Eve-A, KEY-UNAWARE. She knows the classical profile, subtracts it, and -
+%   since the classical profile also tells her where the cross term can live -
+%   weights the residual energy by the known envelope, E = sum(I_env^2 z^2).
+%   With a signal of energy d^2 whose fringe she ignores, the deflection of E
+%   is exactly
+%       delta_A = d^2/sqrt(2 N_env) ,  N_env = (sum I_env^2)^2/sum I_env^4 ,
+%   N_env being the number of samples the envelope effectively occupies. An
+%   optimal hard window over the envelope does 6 % worse, so the weighted form
+%   is the conservative one. She pays in noise for all N_env samples because,
+%   without kappa, she cannot compress the fringe into one. (Previous versions
+%   integrated all N bins; that radiometer is kept only as a reference.)
 %
 % Eve-B, KEY-AWARE (Kerckhoffs). She knows kappa - it depends only on the
 %   branch separation and atomic constants, and is in any case estimable from
@@ -611,30 +784,85 @@ end
 %   filter as the receiver, measuring |z|^2. That collapses the N bins to one:
 %       delta_B = d^2/sqrt(2).
 %
-% The ratio is therefore exactly sqrt(N), and the simulator checks it. The
+% The ratio is therefore exactly sqrt(N_env), and the simulator checks it. The
 % receiver's only advantage over Eve-B is knowledge of phi, which reads the
 % bit but is not needed to detect that a transmission is taking place. It
 % follows that whenever the link decodes reliably, Eve-B detects it. This is
 % the central negative result of the work and must not be softened.
 %
-% WHAT THIS PAIR DOES NOT COVER. Both are quadratic detectors on the same
+% Eve-C, SCHEME-AWARE BUT KEY-UNAWARE (Section 4.3b, Note 11). She knows
+%   everything Eve-B knows EXCEPT the hopping sequence. She must therefore
+%   test all M admissible fringe pitches and combine them non-coherently,
+%   which spreads her statistic over M cells:
+%       delta_C = d^2/sqrt(2 M) .
+%   She is the correct worst case once hopping is enabled, and she sits
+%   between the other two by construction: delta_B/delta_C = sqrt(M) and
+%   delta_C/delta_A = sqrt(N/M). Eve-B is retained, but its meaning changes:
+%   it is now the KEY-COMPROMISE case, an upper bound on the adversary
+%   rather than the nominal model.
+%   The premise that she cannot recover kappa_n from a single symbol is not
+%   assumed but checked below: it requires the per-symbol matched-filter
+%   deflection to stay well under the threshold a maximum over M hypotheses
+%   demands, sqrt(2 ln M). That the covert operating point automatically
+%   satisfies it is not a coincidence - the same weakness of signal that
+%   makes the channel covert makes the key unextractable - and the check
+%   turns that argument into a number.
+%
+% WHAT THIS TRIO DOES NOT COVER. Both are quadratic detectors on the same
 % observable. An adversary using a different observable - the line centroid,
 % treated separately in Section 4.10 - or a different statistic, or one who
 % accumulates across several passes, is outside the model. The two chosen
 % here bracket the key-knowledge axis, not the space of all strategies.
 d_cross = interp1(t_ep, opt.d_ep, t_sec(idx_cross), 'linear', 'extrap');
-delta_A = d_cross^2/sqrt(2*cfg.N);
+delta_A = d_cross^2/sqrt(2*opt.N_env);
 delta_B = d_cross^2/sqrt(2);
+delta_C = d_cross^2/sqrt(2*opt.M_eff);
 fprintf('\n--- 4.9 Adversary models (evaluated at closest approach) ---\n');
 fprintf('Receiver deflection d = %.3f -> raw BER = %.4f\n', d_cross, 0.5*erfc(d_cross/sqrt(2)));
 fprintf('Eve-A (energy)   delta = %.3e per symbol -> threshold after %.2e symbols\n', ...
         delta_A, (SNR_thr_Eve/delta_A)^2);
+fprintf('Eve-C (hop-blind) delta = %.3e per symbol -> threshold after %.2e symbols\n', ...
+        delta_C, (SNR_thr_Eve/delta_C)^2);
 fprintf('Eve-B (matched)  delta = %.3e per symbol -> threshold after %.2e symbols\n', ...
         delta_B, (SNR_thr_Eve/delta_B)^2);
-fprintf('Sensitivity ratio Eve-B/Eve-A = %.1f (expected sqrt(N) = %.1f)\n', ...
-        delta_B/delta_A, sqrt(cfg.N));
-if abs(delta_B/delta_A - sqrt(cfg.N)) > 1e-6*sqrt(cfg.N)
-    warning('Adversary ratio departs from sqrt(N): the detector models are inconsistent.');
+fprintf('Sensitivity ratio Eve-B/Eve-A = %.1f (expected sqrt(N_env) = %.1f)\n', ...
+        delta_B/delta_A, sqrt(opt.N_env));
+fprintf('  of which hopping takes back %.1f dB of the %.1f dB advantage\n', ...
+        20*log10(delta_B/max(delta_C,eps)), 20*log10(delta_B/delta_A));
+if abs(delta_B/delta_A - sqrt(opt.N_env)) > 1e-6*sqrt(opt.N_env)
+    warning('Adversary ratio departs from sqrt(N_env): the detector models are inconsistent.');
+end
+if abs(delta_B/delta_C - sqrt(opt.M_eff)) > 1e-6*sqrt(opt.M_eff)
+    warning('Eve-C ratio departs from sqrt(M): the hopping model is inconsistent.');
+end
+% Can Eve-C recover the pitch from a single symbol? This is IDENTIFICATION,
+% not detection, and the two use different statistics. To lock onto the
+% correct hypothesis among M she needs the matched-filter amplitude in the
+% right cell, which is d, to stand above the largest of M noise cells, which
+% is of order sqrt(2 ln M). Her detection deflection d^2/sqrt(2) is the wrong
+% quantity to compare here and would overstate the danger.
+% The distinction matters: if she could identify the pitch per symbol she
+% would collapse onto Eve-B and the hopping argument would be circular.
+if cfg.hopping
+    d_id   = sqrt(2*log(max(opt.M_eff,2)));
+    d_pass = opt.d_ep;
+    fprintf('  check: single-symbol pitch identification needs d >~ %.2f\n', d_id);
+    % Identification is checked on the UNFADED power: a pointing fade can only
+    % lower d, so the unfaded epoch is the adversary's best case.
+    d_cross_uf = d_cross/sqrt(L_point_mean);
+    d_pass_uf  = d_pass/sqrt(L_point_mean);
+    fprintf('         d at closest approach %.2f with mean fading, %.2f unfaded (margin x%.2f on the unfaded value)\n', ...
+            d_cross, d_cross_uf, d_id/max(d_cross_uf,eps));
+    fprintf('         pass median %.2f with mean fading, %.2f unfaded (margin x%.2f)\n', ...
+            median(d_pass), median(d_pass_uf), d_id/max(median(d_pass_uf),eps));
+    fprintf('         epochs above half that bound (unfaded): %.0f %% of the pass\n', ...
+            100*mean(d_pass_uf > 0.5*d_id));
+    if d_cross_uf > 0.5*d_id
+        fprintf('         NOTE: the margin is thin only near closest approach. Capping the\n');
+        fprintf('         per-symbol deflection at %.2f restores it and costs almost nothing,\n', 0.5*d_id);
+        fprintf('         since capacity saturates in d while the detection statistic grows as\n');
+        fprintf('         d^2: the strong epochs buy little and spend the covert budget fast.\n');
+    end
 end
 
 % --- Verification of the adversary models --------------------------------
@@ -647,10 +875,11 @@ rsEve   = RandStream('mrg32k3a','Seed',SEED_MASTER); rsEve.Substream = 9;
 nTrial  = 2000;
 s_unit  = sig.tmpl*(d_cross/sqrt(sum(sig.tmpl.^2)));   % ||s_unit|| = d_cross
 E_null  = zeros(1,nTrial); E_sig = zeros(1,nTrial);
+wA      = sig.I_env.^2/max(sig.I_env.^2);          % Eve-A weights (known envelope)
 for it = 1:nTrial
     z = randn(rsEve,cfg.N,1);
-    E_null(it) = sum(z.^2);
-    E_sig(it)  = sum((z+s_unit).^2);
+    E_null(it) = sum(wA.*z.^2);                 % envelope-weighted energy
+    E_sig(it)  = sum(wA.*(z+s_unit).^2);
 end
 delta_A_mc = (mean(E_sig)-mean(E_null))/std(E_null);
 fprintf('  check: Eve-A measured on the energy statistic = %.3e vs closed form %.3e (ratio %.3f)\n', ...
@@ -723,9 +952,15 @@ fprintf('  REQUIREMENT (accumulated epoch by epoch, the correct one): %.2e rad\n
 % the defensible security argument is that the eavesdropper must be
 % physically inside the FSO beam. That claim is quantifiable.
 fprintf('\n--- 4.11 Geometric LPI ---\n');
-fprintf('Divergence %.1f urad -> beam radius %.2f m at %.0f km\n', ...
-        theta_div*1e6, theta_div*d_min, d_min/1000);
-fprintf('Illuminated fraction of solid angle = %.2e\n', theta_div^2/4);
+% theta_div is the FULL 1/e^2 divergence (Section 3 convention), so the 1/e^2
+% radius at distance d is (theta_div/2)*d and the illuminated cone of half-angle
+% a = theta_div/2 covers a fraction pi*a^2/(4*pi) = a^2/4 of the full solid
+% angle. Previous versions used theta_div as the half-angle here, which
+% doubled the radius and quadrupled the fraction (Note 16).
+a_half = theta_div/2;
+fprintf('Divergence %.1f urad (full, 1/e^2) -> beam radius %.2f m, diameter %.2f m at %.0f km\n', ...
+        theta_div*1e6, a_half*d_min, 2*a_half*d_min, d_min/1000);
+fprintf('Illuminated fraction of solid angle = %.2e\n', a_half^2/4);
 
 %% ------------------------------------------------------------------------
 % 4.12 Consistency checks
@@ -849,6 +1084,29 @@ cfg.block      = 32;
 % an exact shortcut that is silently wrong is worse than a slow one.
 cfg.fastMC = true;
 
+% --- Fringe hopping inside the Monte Carlo (Note 14) -----------------------
+% With hopping, the keyed sequence draws each symbol's pitch from the
+% resolvable alphabet: M_res pitches spread evenly over the admissible range
+% of fringe counts, so that neighbouring pitches are roughly one correlation
+% length apart. Campaign A keeps the declared pitch only, because it validates
+% the receiver against the closed-form curve Q(||s||/sigma) of that pitch.
+if cfg.hopping
+    cfg.F_alpha = unique(round(linspace(opt.F_min, F_top, max(1,round(opt.M_res)))));
+else
+    cfg.F_alpha = opt.F_now;
+end
+cfg_A = cfg;  cfg_A.F_alpha = opt.F_now;
+% Template energy averaged over the alphabet, used for the adversaries'
+% deflections in Section 8 (their statistics do not see Bob's tracking loss).
+K_a   = cfg.F_alpha/cfg.B_IF;
+g_eve = sqrt(mean(sum((sig.I_env.*cos(K_a.*cfg.dw)).^2, 1)));
+fprintf('\nMonte Carlo alphabet: %d pitches, F from %d to %d (declared pitch F = %.1f used for Campaign A)\n', ...
+        numel(cfg.F_alpha), min(cfg.F_alpha), max(cfg.F_alpha), opt.F_now);
+trkLoss_a = exp(-(2*pi*cfg.sigma_f_track*K_a).^2/2);        % amplitude factor per pitch
+fprintf('  tracking loss over the alphabet: mean %.3f dB, worst %.3f dB (amplitude); Bob''s d^2 falls by %.1f %% on average\n', ...
+        -20*log10(mean(trkLoss_a)), -20*log10(min(trkLoss_a)), 100*(1-mean(trkLoss_a.^2)));
+fprintf('  alphabet-averaged template energy vs declared pitch: %.3f\n', g_eve^2/sum(sig.tmpl.^2));
+
 %% ========================================================================
 % 5. CAMPAIGN A: BIT-ERROR-RATE WATERFALL AND ANALYTICAL VALIDATION
 % =========================================================================
@@ -862,7 +1120,7 @@ BER_theory_A = 0.5*erfc((g_mf./sigma_vec)/sqrt(2));
 for is = 1:nS
     for mc = 1:cfg.N_MC
         rs = mcStream(SEED_MASTER,1,is,mc);
-        [ne,nb] = runFrame(cfg, sig, sigma_vec(is), rs);
+        [ne,nb] = runFrame(cfg_A, sig, sigma_vec(is), rs);
         errA(is) = errA(is)+ne; bitA(is) = bitA(is)+nb;
     end
     fprintf('  sigma = %.2e | d = %5.2f | BER simulated = %.3e | BER theory = %.3e\n', ...
@@ -922,7 +1180,7 @@ for ie = 1:N_epochs
     sigma_B(ie) = acc/cfg.N_MC;
     BER_B(ie)   = errB(ie)/bitB(ie);
     fprintf('  t = %6.1f s | range = %7.1f km | sigma = %.2e | d = %5.2f | BER = %.3e\n', ...
-            t_ep(ie), d_t(ii)/1000, sigma_B(ie), g_mf/sigma_B(ie), BER_B(ie));
+            t_ep(ie), d_t(ii)/1000, sigma_B(ie), g_eve/sigma_B(ie), BER_B(ie));
 end
 [BER_B_lo,BER_B_hi] = wilsonCI(errB,bitB,1.96);
 % Note 5 requires this check rather than assuming it. Near BER = 0.5 the
@@ -970,9 +1228,10 @@ fprintf('  the template and requires a separate study.\n');
 
 % The deflection is linear in OD, so this sensitivity needs no Monte Carlo.
 fprintf('--- 7.2 Imprint depth (deflection at the pass-median noise, faded) ---\n');
-% The sweep is clipped at unity: OD is a fractional modulation depth and a
-% value above one has no physical meaning. With a declared OD near the top of
-% the range the multipliers are chosen to bracket it from below.
+% The sweep is clipped at unity. OD is an rms optical depth (Note 12), so a
+% larger value is not unphysical; the clip is kept as a conservative range in
+% which the valley, where the signal lives, stays deep in the optically thin
+% regime. The multipliers bracket the declared value mostly from below.
 OD_vec = unique(min(cfg.OD*[0.1 0.25 0.5 1 1.25], 1));
 for k = 1:numel(OD_vec)
     d_k = (OD_vec(k)/cfg.OD)*(g_mf/sigma_ref);
@@ -1051,16 +1310,71 @@ fprintf('  the image peak walks into the read bin.\n');
 fprintf('\n=== 8. CAPACITY AND COVERT VOLUME ===\n');
 n_sym_ep   = (dt_ep.*avail_ep)/cfg.T_sym;
 C_ep_sim   = 1 - binaryEntropy(BER_B);
-d_ep_sim   = g_mf./sigma_B;
-delta_A_ep = d_ep_sim.^2/sqrt(2*cfg.N);
+d_ep_sim   = g_eve./sigma_B;   % alphabet-averaged template energy (Note 14)
+delta_A_ep = d_ep_sim.^2/sqrt(2*opt.N_env);
 delta_B_ep = d_ep_sim.^2/sqrt(2);
+delta_C_ep = d_ep_sim.^2/sqrt(2*opt.M_eff);
 
 bits_cum = cumsum(n_sym_ep.*C_ep_sim);
 eveA_cum = sqrt(cumsum(n_sym_ep.*delta_A_ep.^2));
 eveB_cum = sqrt(cumsum(n_sym_ep.*delta_B_ep.^2));
+eveC_cum = sqrt(cumsum(n_sym_ep.*delta_C_ep.^2));
 
 B_covert_A = volumeAtThreshold(bits_cum, eveA_cum, SNR_thr_Eve, n_sym_ep, C_ep_sim, delta_A_ep);
 B_covert_B = volumeAtThreshold(bits_cum, eveB_cum, SNR_thr_Eve, n_sym_ep, C_ep_sim, delta_B_ep);
+B_covert_C = volumeAtThreshold(bits_cum, eveC_cum, SNR_thr_Eve, n_sym_ep, C_ep_sim, delta_C_ep);
+
+% --- Reading of the detection threshold (Note 12) -------------------------
+% A threshold thr on the accumulated deflection means that the optimal test
+% of the eavesdropper, at the moment the transmission stops, has total error
+% P_FA + P_MD = 2 Q(thr/2). thr = 3 gives 0.13, a lenient covertness
+% criterion. The volumes are therefore also reported at thr = 1 (total error
+% 0.62), at the SAME operating point: the design is not re-optimised, so these
+% figures show the sensitivity of the result to the criterion, not the
+% optimum under it.
+thr_alt = 1;
+B_covert_A1 = volumeAtThreshold(bits_cum, eveA_cum, thr_alt, n_sym_ep, C_ep_sim, delta_A_ep);
+B_covert_C1 = volumeAtThreshold(bits_cum, eveC_cum, thr_alt, n_sym_ep, C_ep_sim, delta_C_ep);
+B_covert_B1 = volumeAtThreshold(bits_cum, eveB_cum, thr_alt, n_sym_ep, C_ep_sim, delta_B_ep);
+Pe_tot = @(t) erfc(t/(2*sqrt(2)));          % 2 Q(t/2)
+
+% --- Eve-C: conservative lower bound (Note 15) -----------------------------
+% The Eve-C model assumes she cannot identify the pitch of a single symbol,
+% which requires d below the identification threshold sqrt(2 ln M). Near
+% closest approach, on the UNFADED power (the adversary's best case), d comes
+% close to it. Rather than assume the premise holds there, every epoch whose
+% unfaded design deflection exceeds half the threshold is treated as if Eve-C
+% had identified the pitch, i.e. with Eve-B's deflection. The resulting volume
+% is a guaranteed lower bound: the covert volume against Eve-C lies between it
+% and the nominal figure, with no assumption left on the identification regime.
+d_id_c   = sqrt(2*log(max(opt.M_eff,2)));
+d_uf_ep  = opt.d_ep/sqrt(L_point_mean);                 % unfaded design deflection
+idMask   = d_uf_ep > 0.5*d_id_c;
+delta_Cc_ep = delta_C_ep;  delta_Cc_ep(idMask) = delta_B_ep(idMask);
+eveCc_cum   = sqrt(cumsum(n_sym_ep.*delta_Cc_ep.^2));
+B_covert_Cc = volumeAtThreshold(bits_cum, eveCc_cum, SNR_thr_Eve, n_sym_ep, C_ep_sim, delta_Cc_ep);
+B_covert_Cc1 = volumeAtThreshold(bits_cum, eveCc_cum, 1, n_sym_ep, C_ep_sim, delta_Cc_ep);
+
+% --- Full-band radiometer, for reference only (Note 13) --------------------
+% An energy detector that ignores where the cross term lives and integrates
+% all N bins. It is not a threat model - anyone who knows the classical
+% profile does better - and is reported only to show what the envelope
+% knowledge of Eve-A is worth.
+delta_Af_ep = d_ep_sim.^2/sqrt(2*cfg.N);
+eveAf_cum   = sqrt(cumsum(n_sym_ep.*delta_Af_ep.^2));
+B_covert_Af = volumeAtThreshold(bits_cum, eveAf_cum, SNR_thr_Eve, n_sym_ep, C_ep_sim, delta_Af_ep);
+
+% --- Key cost of the hopping sequence ------------------------------------
+% Per-symbol hopping consumes log2(M) key bits per symbol, with M the number
+% of RESOLVABLE pitches: drawing among near-identical integer counts would
+% spend key without adding secrecy (Note 12). That is far above
+% the O(sqrt(n) log n) the theory requires, so the scheme is NOT key
+% efficient, and saying so is part of the result. With a stream cipher the
+% pre-shared seed is a few hundred bits and the rest is expansion, at the
+% price of moving from information-theoretic to computational covertness.
+key_per_sym = log2(max(opt.M_eff,2));
+key_total   = key_per_sym*opt.M_pass;
+key_srl     = sqrt(opt.M_pass)*log2(max(opt.M_pass,2));
 [~,ie_cr] = min(abs(idx_ep-idx_cross));
 
 fprintf('\n============ SUMMARY: QUANTUM DOPPLER COVERT CHANNEL ============\n');
@@ -1070,6 +1384,8 @@ fprintf('Fringe spacing / fringes in band         : %8.3f MHz / %.1f\n', ...
 fprintf('Optimised packet separation              : %8.2f Delta\n', cfg.sep_over_Delta);
 fprintf('Imprint depth OD (declared)              : %8.3f\n', cfg.OD);
 fprintf('Theta calibration required of the source : %8.2e rad\n', opt.eps_theta_req);
+fprintf('Hopping alphabet (integer fringe counts) : %8d\n', opt.M_alpha);
+fprintf('Resolvable pitches M (cells for Eve-C)   : %8.1f\n', opt.M_eff);
 fprintf('Derived intermediate-frequency bandwidth : %8.2f MHz\n', cfg.B_IF/1e6);
 fprintf('Raw symbol rate                          : %8.3f kbit/s\n', R_b_raw/1e3);
 fprintf('Matched-filter gain over unweighted sum  : %+8.2f dB\n', 20*log10(g_mf/max(abs(g_flat),eps)));
@@ -1079,14 +1395,49 @@ fprintf('Median capacity over the pass            : %8.4f bit/symbol\n', median(
 fprintf('Peak information throughput              : %8.3f kbit/s\n', max(R_b_raw*C_ep_sim.*avail_ep)/1e3);
 fprintf('----------------------------------------------------------------\n');
 fprintf('VOLUME, no eavesdropper                  : %8.3e bit\n', bits_cum(end));
-fprintf('COVERT VOLUME vs Eve-A (energy detector) : %8.3e bit\n', B_covert_A);
+fprintf('COVERT VOLUME vs Eve-A (envelope energy)  : %8.3e bit  (N_env = %.0f)\n', B_covert_A, opt.N_env);
 fprintf('  Eve-A statistic at end of pass         : %8.2f  (threshold %.1f)\n', eveA_cum(end), SNR_thr_Eve);
-fprintf('COVERT VOLUME vs Eve-B (key-aware)       : %8.3e bit\n', B_covert_B);
+fprintf('COVERT VOLUME vs Eve-C (hop-blind)       : %8.3e bit  (M = %.1f)\n', B_covert_C, opt.M_eff);
+fprintf('  Eve-C statistic at end of pass         : %8.2f  (threshold %.1f)\n', eveC_cum(end), SNR_thr_Eve);
+fprintf('  Eve-C lower bound (identification assumed where unfaded d > %.2f, %d of %d epochs): %8.3e bit\n', ...
+        0.5*d_id_c, sum(idMask), numel(idMask), B_covert_Cc);
+fprintf('  -> defensible covert volume vs Eve-C lies in [%.3e, %.3e] bit\n', B_covert_Cc, B_covert_C);
+fprintf('COVERT VOLUME vs Eve-B (key compromised) : %8.3e bit\n', B_covert_B);
 fprintf('  Eve-B statistic at end of pass         : %8.2e (threshold %.1f)\n', eveB_cum(end), SNR_thr_Eve);
+fprintf('  reference: full-band radiometer (N = %d, not a threat model): %8.3e bit\n', ...
+        cfg.N, B_covert_Af);
 fprintf('----------------------------------------------------------------\n');
-fprintf('The defensible figure is the Eve-A volume, and it holds only if covertness\n');
-fprintf('rests on the geometric argument of Section 4.11. Under the Kerckhoffs\n');
-fprintf('assumption (Eve-B) the channel is not covert.\n');
+fprintf('THRESHOLD READING: thr = %.1f -> eavesdropper total error P_FA+P_MD = %.3f at stop\n', ...
+        SNR_thr_Eve, Pe_tot(SNR_thr_Eve));
+fprintf('  same operating point, thr = %.1f (P_FA+P_MD = %.3f):\n', thr_alt, Pe_tot(thr_alt));
+fprintf('    vs Eve-A %8.3e bit | vs Eve-C %8.3e bit (lower bound %8.3e) | vs Eve-B %8.3e bit\n', ...
+        B_covert_A1, B_covert_C1, B_covert_Cc1, B_covert_B1);
+fprintf('  Eve-C / Eve-A volume ratio             : %8.3f (asymptotic sqrt(M/N_env) = %.3f)\n', ...
+        B_covert_C/max(B_covert_A,eps), sqrt(opt.M_eff/opt.N_env));
+fprintf('    The asymptotic ratio assumes equal epochs and truncation deep inside\n');
+fprintf('    the pass for both adversaries. Here the epochs are strongly unequal and\n');
+fprintf('    the two adversaries truncate at different points of the pass, so the\n');
+fprintf('    measured ratio differs from sqrt(M/N_env). The square-root scaling itself\n');
+fprintf('    is verified in Sections 8.2 and 9.1.\n');
+fprintf('----------------------------------------------------------------\n');
+fprintf('KEY COST: %.1f bit/symbol -> %.2e bit per pass\n', key_per_sym, key_total);
+fprintf('  square-root-law requirement sqrt(n) log n : %.2e bit\n', key_srl);
+fprintf('  ratio %.0fx: the channel is NOT key efficient. A stream cipher seeded\n', ...
+        key_total/max(key_srl,eps));
+fprintf('  with a short pre-shared key closes the gap, at the price of\n');
+fprintf('  computational rather than information-theoretic covertness.\n');
+fprintf('----------------------------------------------------------------\n');
+if cfg.hopping
+    fprintf('With hopping enabled the defensible figure is the Eve-C volume, and it\n');
+    fprintf('holds under the Kerckhoffs assumption because the secret is now a key\n');
+    fprintf('and not a constant of the apparatus. Eve-A remains an upper bound and\n');
+    fprintf('Eve-B the key-compromise case, where only the geometric argument of\n');
+    fprintf('Section 4.11 survives. Hopping does not evade the square root law.\n');
+else
+    fprintf('The defensible figure is the Eve-A volume, and it holds only if covertness\n');
+    fprintf('rests on the geometric argument of Section 4.11. Under the Kerckhoffs\n');
+    fprintf('assumption (Eve-B) the channel is not covert.\n');
+end
 fprintf('================================================================\n');
 
 %% ------------------------------------------------------------------------
@@ -1103,12 +1454,16 @@ fprintf('================================================================\n');
 % bound on what a formation-flying pair would deliver, not a prediction.
 fprintf('\n--- 8.1 Control: stationary geometry at closest-approach range ---\n');
 par_stat = par;
-par_stat.P_ep  = P_rx_ideal_t(idx_cross)*ones(1,N_epochs);
+par_stat.P_ep  = P_rx_ideal_t(idx_cross)*L_point_mean*ones(1,N_epochs);   % same fading as the pass design
 par_stat.dt_ep = (T_window/N_epochs)*ones(1,N_epochs);
 B_stat = zeros(1,nSep);
 for k = 1:nSep
     o_s = operatingPoint(sep_vec(k), par_stat);
-    if o_s.nyquistPhase < pi, B_stat(k) = o_s.volume_naive; end
+    if o_s.nyquistPhase < pi
+        % Same adversary as the pass optimum (Note 12): comparing a stationary
+        % Eve-A volume with a pass Eve-C volume would mix two criteria.
+        if cfg.hopping, B_stat(k) = o_s.volume_hopped; else, B_stat(k) = o_s.volume_naive; end
+    end
 end
 [Bs_best, ks_best] = max(B_stat);
 o_stat = operatingPoint(sep_vec(ks_best), par_stat);
@@ -1149,10 +1504,11 @@ end
 % the imprint depth is scanned as a proxy for the deflection, which is linear
 % in OD. The per-epoch link conditions are held exactly as the pass delivers
 % them and only the DWELL is stretched, so this is a hypothetical window of a
-% different length under the same geometry and not a different orbit. The law
-% applies against the key-unaware detector, which is the defensible figure of
-% this work; against Eve-B the threshold is crossed almost at once and the
-% length of the window never enters.
+% different length under the same geometry and not a different orbit. The
+% volume is measured against the adversary the design targets - Eve-C with
+% hopping, which is the defensible figure of this work, Eve-A without - so the
+% exponents describe the headline number. Against Eve-B the threshold is
+% crossed almost at once and the length of the window never enters.
 fprintf('\n--- 8.2 Scaling of the covert volume with window length ---\n');
 scale_vec = [1 4 16 64 256];
 g_vec     = logspace(-4, log10(1/cfg.OD), 60);   % OD multiplier, OD clipped at 1
@@ -1163,8 +1519,11 @@ for is = 1:numel(scale_vec)
     for ig = 1:numel(g_vec)
         par_s.OD = cfg.OD*g_vec(ig);
         o_s = operatingPoint(cfg.sep_over_Delta, par_s);
-        if o_s.volume_naive > best
-            best = o_s.volume_naive;  bestd = median(o_s.d_ep);
+        % Measured against the adversary the design targets (Eve-C with
+        % hopping, Eve-A without), consistent with the headline figure.
+        if cfg.hopping, v_s = o_s.volume_hopped; else, v_s = o_s.volume_naive; end
+        if v_s > best
+            best = v_s;  bestd = median(o_s.d_ep);
         end
     end
     B_scale(is) = best;  d_scale(is) = bestd;
@@ -1294,9 +1653,14 @@ grid on;
 
 % (b) Cumulative Volume
 subplot(1,2,2);
-plot(t_ep, bits_cum/1e3, 'LineWidth', 1.5); hold on;
-yline(B_covert_A/1e3, 'g--', 'Covert volume vs Eve-A', 'LineWidth', 1.2);
-yline(B_covert_B/1e3, 'r--', 'Covert volume vs Eve-B', 'LineWidth', 1.2);
+plot(t_ep, bits_cum/1e3, 'k-', 'LineWidth', 1.5); hold on;   % cumulative volume in black, distinct from the Eve-C lines
+yline(B_covert_A/1e3, 'g--', 'vs Eve-A (envelope energy)', 'LineWidth', 1.2);
+% Only the nominal Eve-C ceiling is drawn. The guaranteed lower bound of
+% Section 8 lies close to the Eve-B line (the epochs it treats as identified
+% are those where the adversary's statistic grows fastest), so a separate line
+% would add clutter without information; it is reported in the text.
+yline(B_covert_C/1e3, 'b-.', 'vs Eve-C (hop-blind)', 'LineWidth', 1.4);
+yline(B_covert_B/1e3, 'r--', 'vs Eve-B (key compromised)', 'LineWidth', 1.2);
 xlabel('Time from Pass Start [s]'); 
 ylabel('Cumulative Volume [kbit]');
 title('(b) Covert Information Volume'); 
@@ -1310,14 +1674,15 @@ figure('Name','Fig 3 Design optimisation and sensitivities','Color','w','Positio
 % (a) Operating Point Sweep
 subplot(1,2,1);
 semilogy(sep_vec, max(B_noEve,1e-3), '--', 'LineWidth', 1.2); hold on;
-semilogy(sep_vec, max(B_naive,1e-3), 'LineWidth', 1.6);
+semilogy(sep_vec, max(B_naive,1e-3), 'LineWidth', 1.2);
+semilogy(sep_vec, max(B_hop,1e-3), 'LineWidth', 1.6);
 semilogy(sep_vec, max(B_keyed,1e-3), 'LineWidth', 1.2);
 xline(cfg.sep_over_Delta, 'k:', 'optimum', 'LineWidth', 1.2);
 xlabel('Wavepacket Separation [\Delta_p]'); 
 ylabel('Pass Volume [bit]');
 title('(a) Operating Point Optimization');
-legend({'no eavesdropper', 'covert vs Eve-A', 'covert vs Eve-B'}, ...
-       'Location', 'southoutside', 'Orientation', 'horizontal', 'FontSize', 7.5);
+legend({'no eavesdropper', 'vs Eve-A', 'vs Eve-C (hop-blind)', 'vs Eve-B'}, ...
+       'Location', 'southoutside', 'Orientation', 'horizontal', 'FontSize', 7);
 grid on;
 
 % (b) Imprint Depth Sensitivity
@@ -1329,6 +1694,77 @@ xline(cfg.OD, 'k:', 'declared', 'LineWidth', 1.2);
 xlabel('Imprint Depth [OD]');
 ylabel('Capacity [bit/symbol]');
 title('(b) Imprint Depth Sensitivity');
+grid on;
+
+% -------------------------------------------------------------------------
+% FIG 4: HOPPING ALPHABET AND ITS CEILINGS
+% -------------------------------------------------------------------------
+% (a) says how much the alphabet is worth, (b) says what limits it. The pair
+% is the whole argument of Section 4.3b: the covert volume is bought with
+% alphabet size, and the alphabet is currently paid for in Doppler tracking
+% accuracy rather than in anything to do with the atomic source.
+figure('Name','Fig 4 Hopping alphabet','Color','w','Position',[170 40 900 400]);
+
+% (a) Covert volume against the hop-blind adversary versus alphabet size.
+% Recomputed from the SIMULATED per-epoch deflections, so this curve carries
+% the pointing statistics of Campaign B and not the design-point values.
+subplot(1,2,1);
+M_vec = unique(round(logspace(0, log10(opt.N_env), 45)));   % beyond N_env Eve-C would use the energy detector
+B_vec = zeros(size(M_vec));
+for k = 1:numel(M_vec)
+    dC = d_ep_sim.^2/sqrt(2*M_vec(k));
+    eC = sqrt(cumsum(n_sym_ep.*dC.^2));
+    B_vec(k) = volumeAtThreshold(bits_cum, eC, SNR_thr_Eve, n_sym_ep, C_ep_sim, dC);
+end
+loglog(M_vec, max(B_vec,eps), 'LineWidth', 1.6); hold on;
+% Reference slope one half. With the amplitude re-optimised and equal epochs
+% the covert volume would follow B = thr sqrt(2 M_eff M_pass)/(pi ln2), a
+% straight line of slope 1/2. Here the operating point is FIXED and the
+% epochs of the pass are strongly unequal, so the measured slope is lower
+% (Section 9.1 printout); the square-root law is tested in Section 8.2.
+% Where the curve flattens the pass duration binds instead of detection.
+ref = max(B_vec(1),eps)*sqrt(M_vec/M_vec(1));
+loglog(M_vec, ref, 'k:', 'LineWidth', 1.1);
+xline(max(opt.M_eff,1), 'b-.', 'M resolvable', 'LineWidth', 1.3, 'LabelOrientation', 'horizontal');
+xline(opt.N_env, 'g--', 'Eve-A (M = N_{env})', 'LineWidth', 1.1, 'LabelOrientation', 'horizontal');
+xlabel('Resolvable Alphabet M [independent pitches]');
+ylabel('Covert Volume vs Eve-C [bit]');
+title('(a) Covert Volume Bought with Alphabet Size');
+legend({'simulated', 'slope 1/2 reference'}, 'Location', 'southeast', 'FontSize', 8);
+grid on; xlim([1 opt.N_env]);
+
+% Run-time check of the scaling, so the exponent is measured and not assumed
+% in the text. Only the region where the detection constraint binds is fitted.
+useFit = B_vec > 0 & B_vec < 0.95*bits_cum(end);
+if sum(useFit) >= 5
+    pf = polyfit(log10(M_vec(useFit)), log10(B_vec(useFit)), 1);
+    fprintf('\n--- 9.1 Hopping alphabet scaling ---\n');
+    fprintf('  covert volume at FIXED operating point grows as M^%.3f over %d points\n', ...
+            pf(1), sum(useFit));
+    fprintf('  (not expected to be exactly 0.5: the amplitude is not re-optimised for each M\n');
+    fprintf('   and the statistic accumulates chronologically over very unequal epochs, so the\n');
+    fprintf('   truncation point moves across epochs of different capacity. The square-root\n');
+    fprintf('   law itself is tested in Section 8.2, where the amplitude is re-optimised.)\n');
+    if pf(1) <= 0 || pf(1) > 1
+        warning('Covert volume vs alphabet size has a non-physical slope: check the Eve-C model.');
+    end
+else
+    fprintf('\n--- 9.1 Hopping alphabet scaling: too few unsaturated points to fit ---\n');
+end
+
+% (b) What limits the alphabet: the tracking residual, not the fringe physics.
+subplot(1,2,2);
+sf_vec  = logspace(1, 4, 200);
+phi_tol = sqrt(2*log(10^(cfg.hopLossTol_dB/20)));
+F_trk_v = (phi_tol./(2*pi*sf_vec))*cfg.B_IF;
+% Integer counts admitted by the ceilings, converted to RESOLVABLE pitches.
+M_v     = resolvablePitches(max(1, floor(min(F_trk_v, opt.F_nyq)) - opt.F_min + 1), opt.rhoA);
+loglog(sf_vec, M_v, 'LineWidth', 1.6); hold on;
+yline(resolvablePitches(floor(opt.F_nyq)-opt.F_min+1, opt.rhoA), 'k--', 'Nyquist ceiling', 'LineWidth', 1.1, 'LabelOrientation', 'horizontal');
+xline(cfg.sigma_f_track, 'r:', '\sigma_f declared', 'LineWidth', 1.3, 'LabelOrientation', 'horizontal');
+xlabel('Doppler Tracking Residual \sigma_f [Hz]');
+ylabel('Resolvable Alphabet M');
+title(sprintf('(b) Alphabet Ceiling (budget %.1f dB)', cfg.hopLossTol_dB));
 grid on;
 
 fprintf('\n--- SIMULATION COMPLETE ---\n');
@@ -1389,8 +1825,66 @@ function out = operatingPoint(sep, par)
     d_ep     = sqrt(signalEnergy)./sigma_ep;
     BER_ep   = 0.5*erfc(d_ep/sqrt(2));
     C_ep     = 1 - binaryEntropy(BER_ep);
-    delta_A  = d_ep.^2/sqrt(2*N);                      % key-unaware detector
+    % Eve-A (key-unaware energy detector). She knows the classical profile,
+    % hence where the cross term can live, and weights the residual energy by
+    % the known envelope I_env^2. That statistic has deflection exactly
+    % d^2/sqrt(2 N_env), N_env being the participation ratio of I_env^2 (the
+    % samples the envelope effectively occupies). See Note 13.
+    N_env    = sum(I_env.^2)^2/sum(I_env.^4);
+    delta_A  = d_ep.^2/sqrt(2*N_env);                  % key-unaware detector
     delta_B  = d_ep.^2/sqrt(2);                        % key-aware detector
+
+    % --- Fringe-hopping alphabet (Section 4.3b, Notes 11 and 12) ---------
+    % The three ceilings below bound the admissible RANGE of the fringe count
+    % F = kappa*B_IF. They do not by themselves give the number of pitches
+    % the adversary must search: two pitches are distinguishable only if
+    % their templates differ where the signal actually lives, that is under
+    % the interference envelope, which occupies a small fraction of the band.
+    % The number of resolvable pitches is therefore computed from the
+    % correlation between templates (Note 12), after the ceilings.
+    F_now = kappa*B_IF;
+    % (a) Nyquist: the fringe phase per spectral sample must stay below pi,
+    %     which caps the fringe count at half the number of bins.
+    F_nyq = (N-1)/2;
+    % (b) Image clearance: the conjugate peak sits 2F bins from the read bin
+    %     and must clear the compressed peak, which sets the LOWER end. The
+    %     half-width uses the same analytic form as Section 4.12 - the
+    %     transform of I_env^2, of spectral width sigma_env/sqrt(2) - so that
+    %     the bottom of the alphabet and the lower bound on Delta_x in
+    %     Section 7.3 are the same statement rather than two nearby numbers.
+    sig_env = (Delta/sqrt(2))*par.Omega_rad;
+    dwStep  = dw(2)-dw(1);
+    halfW   = N/(2*pi*((sig_env/sqrt(2))/dwStep));
+    F_min   = ceil(par.imageMargin*halfW/2);
+    % (c) Doppler tracking residual: a residual offset s scales the
+    %     compressed peak by cos(kappa*s), so a coarser fringe is more
+    %     forgiving and a finer one is not. The ceiling sits where the
+    %     averaged loss exp(-sigma_phi^2/2) reaches the declared budget.
+    %     At the declared sigma_f this is the ceiling that BINDS, which is
+    %     what makes the tracking residual a security parameter.
+    phi_tol = sqrt(2*log(10^(par.hopLossTol_dB/20)));
+    F_trk   = (phi_tol/(2*pi*par.sigma_f))*B_IF;
+    M_alpha = max(0, floor(min(F_nyq,F_trk)) - F_min + 1);   % integer counts
+    % Resolvable pitches (Note 12). For two integer counts F and F+k the
+    % normalised correlation of the templates I_env cos(F dw/B_IF) is, up to
+    % a sum-frequency term that averages out under the envelope,
+    %     rho(k) = sum_w w cos(k dw/B_IF) ,   w = I_env^2/sum(I_env^2) ,
+    % which for the Gaussian weight is exp(-(k sigW/B_IF)^2/2), sigW being
+    % the rms width of I_env^2 in rad/s. The number of independent
+    % hypotheses in a set of M_alpha consecutive counts is the participation
+    % ratio of that correlation matrix, M_alpha^2/sum_ij rho(i-j)^2. This is
+    % the number of cells Eve-C really spreads her statistic over; adjacent
+    % integer counts are near-identical templates and buy nothing.
+    wI    = I_env.^2/sum(I_env.^2);
+    sigW  = sqrt(sum(wI.*dw.^2) - sum(wI.*dw)^2);
+    rhoA  = sigW/B_IF;                      % correlation decay per unit of F
+    M_res = resolvablePitches(M_alpha, rhoA);
+    if par.hopping
+        M_eff = min(max(M_res,1), N_env); % capped at N_env: beyond it Eve-C
+    else                                  % would simply use the energy
+        M_eff = 1;                        % detector instead
+    end
+    delta_C = d_ep.^2/sqrt(2*M_eff);      % scheme-aware, key-unaware
 
     % Centroid leakage: the calibration of theta the emitter must achieve.
     % Reported, not enforced - it is a requirement on the apparatus.
@@ -1408,6 +1902,7 @@ function out = operatingPoint(sep, par)
     bits_cum = cumsum(n_sym.*C_ep);
     eveA     = sqrt(cumsum(n_sym.*delta_A.^2));
     eveB     = sqrt(cumsum(n_sym.*delta_B.^2));
+    eveC     = sqrt(cumsum(n_sym.*delta_C.^2));
 
     out.B_IF = B_IF;  out.T_sym = T_sym;  out.dw = dw;
     out.S_cl = S_cl;  out.I_env = I_env;  out.Phi = Phi;
@@ -1417,6 +1912,18 @@ function out = operatingPoint(sep, par)
     out.volume_noEve = bits_cum(end);
     out.volume_naive = volumeAtThreshold(bits_cum, eveA, par.SNR_thr, n_sym, C_ep, delta_A);
     out.volume_keyed = volumeAtThreshold(bits_cum, eveB, par.SNR_thr, n_sym, C_ep, delta_B);
+    out.volume_hopped = volumeAtThreshold(bits_cum, eveC, par.SNR_thr, n_sym, C_ep, delta_C);
+    out.M_alpha = M_alpha;   out.M_eff = M_eff;
+    out.M_res   = M_res;     out.rhoA  = rhoA;
+    % Samples effectively occupied by the envelope (participation ratio of
+    % I_env^2): the degrees of freedom available to ANY keyed scheme.
+    out.N_env   = N_env;
+    out.F_now   = F_now;     out.F_min = F_min;
+    out.F_nyq   = F_nyq;     out.F_trk = F_trk;
+    out.halfW   = halfW;
+    % The number of cells the TARGETED adversary collects over, used by the
+    % closed-form optimum in Section 4.6.
+    if par.hopping, out.M_eff_target = M_eff; else, out.M_eff_target = N_env; end
     out.kappa   = kappa;
     out.nyquistPhase = kappa*(dw(2)-dw(1));
 end
@@ -1444,6 +1951,20 @@ function B = volumeAtThreshold(bits_cum, eve, thr, n_sym, C_ep, delta)
     end
 end
 
+function Mr = resolvablePitches(Mint, rhoA)
+% Number of independent fringe-pitch hypotheses in a set of Mint consecutive
+% integer fringe counts: participation ratio of the Toeplitz correlation
+% matrix rho(|i-j|) = exp(-((i-j) rhoA)^2/2), see Note 12. Accepts a vector.
+    Mr = zeros(size(Mint));
+    for q = 1:numel(Mint)
+        M = floor(Mint(q));
+        if M <= 1, Mr(q) = max(M,0); continue; end
+        k  = 1:M-1;
+        r2 = exp(-(k*rhoA).^2);            % rho(k)^2
+        Mr(q) = M^2/(M + 2*sum((M-k).*r2));
+    end
+end
+
 function [nerr,nbit] = runFrame(cfg, sig, sigma_noise, rs)
 % Dispatcher: exact sufficient-statistic path when cfg.fastMC is set, full
 % spectral path otherwise.
@@ -1468,36 +1989,43 @@ function [nerr,nbit] = simulateFrame(cfg, sig, sigma_noise, rs)
 % exactly sum(Rx .* I_env .* cos(Phi)), the matched filter for the real
 % template. The transform is an ordinary FFT: with a linear fringe phase no
 % fractional-domain step is required.
+%
+% FRINGE HOPPING (Note 14). cfg.F_alpha lists the fringe counts the keyed
+% sequence can select. With more than one entry, each symbol draws its own
+% pitch; transmitter and receiver both use it, and the residual Doppler
+% offset rotates that symbol's fringe by 2*pi*kappa_n*s, so finer pitches pay
+% more. With a single entry the frame reduces exactly to the fixed-pitch
+% model, with the same sequence of random variates.
     M = cfg.Nbit_frame; N = cfg.N;
+    Fa = cfg.F_alpha(:).';  Q = numel(Fa);
     bits = randi(rs,[0 1],1,M);
 
     % Calibration error on the classical profile, frozen over the frame and
     % therefore acting as a decision bias rather than as averaging noise.
     S_hat = sig.S_cl.*(1 + cfg.eps_sub*randn(rs,N,1));
 
-    % Residual error on the fringe coefficient, frozen over the frame. It
-    % displaces the compression peak by a fraction of a bin, which the fixed
-    % read bin then pays for; the effect is produced by the transform itself
-    % and needs no separate model.
-    kappa_bob = cfg.kappa*(1 + cfg.eps_kappa*randn(rs,1,1));
-    weight    = sig.I_env.*exp(+1i*kappa_bob*cfg.dw);
+    % Residual relative error on the fringe coefficient, frozen over the
+    % frame and common to all pitches. It displaces the compression peak by
+    % F*eps bins, which the fixed read bin then pays for.
+    eps_k = cfg.eps_kappa*randn(rs,1,1);
 
     nerr = 0;
     for i1 = 1:cfg.block:M
         i2 = min(i1+cfg.block-1,M); b = bits(i1:i2); nb = numel(b);
         s  = 1-2*b;                                   % bit 0 -> +1, bit 1 -> -1
-        % Residual Doppler offset rotates the fringe phase rather than
-        % displacing the peak: cos(Phi + dphi) is expanded on the in-phase
-        % and quadrature templates so that no spectrum has to be rebuilt.
-        dphi = cfg.sigma_phi_track*randn(rs,1,nb);
-        Tx   = sig.tmpl.*cos(dphi) - sig.tmpl_q.*sin(dphi);
+        if Q > 1, iq = randi(rs,Q,1,nb); else, iq = ones(1,nb); end
+        kap  = Fa(iq)/cfg.B_IF;                       % pitch of each symbol
+        % Residual Doppler offset: rotates the fringe phase of each symbol.
+        dphi = 2*pi*cfg.sigma_f_track*kap.*randn(rs,1,nb);
+        Tx   = sig.I_env.*cos(kap.*cfg.dw + dphi);    % N x nb
+        W    = sig.I_env.*exp(+1i*(kap*(1+eps_k)).*cfg.dw);
         Rx = sig.S_cl + Tx.*s + sigma_noise*randn(rs,N,nb);
         Rx = Rx - S_hat;
         % The ifftshift is required: the signal is centred at zero detuning,
         % that is at the centre of the array rather than at the first index.
         % Without it the centring is read as a phase ramp and the real part
         % of the compressed peak alternates sign from bin to bin.
-        Y  = fftshift(fft(ifftshift(Rx.*weight,1),[],1),1);
+        Y  = fftshift(fft(ifftshift(Rx.*W,1),[],1),1);
         stat = real(Y(cfg.kpk,:));
         nerr = nerr + sum(double(stat<0) ~= b);
     end
@@ -1506,25 +2034,30 @@ end
 
 function [nerr,nbit] = simulateFrameFast(cfg, sig, sigma_noise, rs)
 % Same model as simulateFrame, evaluated on the sufficient statistic. Exact:
-% see the derivation next to cfg.fastMC. Consumes a different number of
-% random variates, so individual realisations differ from the full path
-% while the statistics do not.
+% see the derivation next to cfg.fastMC. With hopping, the deterministic
+% parts of the statistic (bias, in-phase and quadrature projections, noise
+% scale) are precomputed once per frame for every pitch of the alphabet and
+% each symbol picks its own. Consumes a different number of random variates
+% from the full path, so individual realisations differ while the statistics
+% do not.
     M = cfg.Nbit_frame;  N = cfg.N;
+    Fa = cfg.F_alpha(:).';  Q = numel(Fa);
     bits = randi(rs,[0 1],1,M);
 
-    S_hat  = sig.S_cl.*(1 + cfg.eps_sub*randn(rs,N,1));
-    kappa_bob = cfg.kappa*(1 + cfg.eps_kappa*randn(rs,1,1));
-    weight = sig.I_env.*exp(+1i*kappa_bob*cfg.dw);
-    wR     = real(weight);
+    S_hat = sig.S_cl.*(1 + cfg.eps_sub*randn(rs,N,1));
+    eps_k = cfg.eps_kappa*randn(rs,1,1);
 
-    bias   = sum((sig.S_cl - S_hat).*wR);
-    A      = sum(sig.tmpl  .*wR);
-    Aq     = sum(sig.tmpl_q.*wR);
-    nStd   = sigma_noise*sqrt(sum(wR.^2));
+    K    = Fa/cfg.B_IF;                                        % 1 x Q
+    Wr   = real(sig.I_env.*exp(+1i*(K*(1+eps_k)).*cfg.dw));    % N x Q
+    bias = sum((sig.S_cl - S_hat).*Wr, 1);
+    A    = sum(sig.I_env.*cos(K.*cfg.dw).*Wr, 1);
+    Aq   = sum(sig.I_env.*sin(K.*cfg.dw).*Wr, 1);
+    nStd = sigma_noise*sqrt(sum(Wr.^2, 1));
 
-    s    = 1-2*bits;
-    dphi = cfg.sigma_phi_track*randn(rs,1,M);
-    stat = bias + s.*(A*cos(dphi) - Aq*sin(dphi)) + nStd*randn(rs,1,M);
+    s = 1-2*bits;
+    if Q > 1, iq = randi(rs,Q,1,M); else, iq = ones(1,M); end
+    dphi = 2*pi*cfg.sigma_f_track*K(iq).*randn(rs,1,M);
+    stat = bias(iq) + s.*(A(iq).*cos(dphi) - Aq(iq).*sin(dphi)) + nStd(iq).*randn(rs,1,M);
     nerr = sum(double(stat<0) ~= bits);
     nbit = M;
 end
@@ -1635,11 +2168,28 @@ end
 %     that the emitter transmits continuously over the window, with no duty
 %       cycle lost to preparation, cooling or recalibration. A duty cycle
 %       below one reduces the volume in direct proportion;
-%     that theta is calibrated to the tolerance Section 4.10 reports.
+%     that theta is calibrated to the tolerance Section 4.10 reports;
+%     that the centre of mass evolves FREELY during interrogation (Doppler
+%       regime). Only then is the line the Doppler image of |psi(p)|^2 and is
+%       kappa constant over the symbol, since free dispersion is common to
+%       both branches. A tightly trapped emitter (1 MHz, Lamb-Dicke ~0.3 at
+%       267 nm) would show resolved sidebands instead. f_source is used only
+%       to land on a value of Delta, not to describe a trapped source;
+%     that both branches share the same internal state when probed, so the
+%       cross term appears in absorption (e.g. Bragg-type splitting);
+%     that the imprint comes from an ensemble of emitters all prepared with
+%       the same phi and Delta_x_n in each symbol, which is what makes an
+%       optical depth of order OD reachable (Note 7);
+%     that the coherence of the superposition survives the symbol also under
+%       illumination by the probe.
 %   ON THE RECEIVER
 %     that detection is coherent - amplitude and phase, not intensity alone -
 %       which requires a heterodyne receiver with a local oscillator locked to
 %       the line after the classical Doppler shift is removed;
+%     that the probe carries a flat spectral density over B_IF, so that the
+%       collected photons divide evenly over the N bins (n_bin = total/N), and
+%       that probe and local oscillator stay phase coherent over a symbol;
+%     that the excess-noise factor covers the ~3 dB heterodyne penalty;
 %     that it handles the received flux without saturating;
 %     that the classical profile is known well enough to be subtracted, with
 %       eps_sub the residual; how it is calibrated is not described;
@@ -1732,7 +2282,7 @@ end
 %   Two adversary models are evaluated. The key-unaware detector sums
 %   residual energy after subtracting the known classical profile; the
 %   key-aware detector applies the same matched filter as the receiver. The
-%   ratio of their per-symbol deflections is exactly sqrt(N), verified at
+%   ratio of their per-symbol deflections is exactly sqrt(N_env), verified at
 %   run time. The receiver's only advantage over the key-aware detector is
 %   knowledge of phi, which reads the bit but is not required to detect the
 %   transmission. It follows that whenever the link decodes reliably, a
@@ -1763,17 +2313,14 @@ end
 %   experimental requirements.
 %
 % NOTE 9 - RESULTS, AND HOW TO READ THEM.
-%   The headline quantity is the covert volume per pass against the
-%   key-unaware detector, printed in the summary block and plotted as the
-%   cumulative curve of Fig. 2(b). At the operating point studied here it is
-%   of order 1e5 bits, against about 4e5 bits transmissible with no
-%   eavesdropper present. The binding constraint is therefore DETECTION, not
-%   the duration of the pass: the key-unaware statistic reaches roughly 20
-%   against a threshold of 3 by the end of the pass, so the transmission has
-%   to stop early. This reverses the conclusion reached with the chirped
-%   template, where the two volumes coincided, and the reversal must be
-%   carried into the text. Against the key-aware detector the same
-%   configuration yields of order 1e2 bits.
+%   The headline quantity is the covert volume per pass against Eve-C, the
+%   scheme-aware and key-unaware adversary, printed in the summary block and
+%   plotted in Fig. 2(b); numerical values are those of the current run, not
+%   of this note. The binding constraint is DETECTION, not the duration of
+%   the pass, and the summary reports which fraction of the transmissible
+%   volume is usable. Design figures (Section 4.6, unfaded) and Monte Carlo
+%   figures (Section 8, faded) must never be mixed in the same statement.
+%   Against Eve-B the channel yields of order 1e2 bits.
 %   Two structural observations deserve emphasis. First, repeating the
 %   optimisation at different imprint depths leaves the covert volume nearly
 %   unchanged, because the optimiser trades deflection against symbol count;
@@ -1806,11 +2353,9 @@ end
 %   the conjugate stayed chirped and its energy spread over the time-
 %   bandwidth product. With a linear fringe it does not spread: it forms a
 %   second compressed peak of equal height, displaced by 2 kappa B_IF bins,
-%   about thirty-five at the present operating point against a compressed
-%   half-width of sixteen. That margin of 2.2 trips the guard in Section 4.12
-%   and is the one open item in the model: raising Delta_x to about 90 nm
-%   moves the image clear and simultaneously restores the fringe count. This
-%   is not a loss of deflection. The
+%   about fifty at the present operating point (Delta_x = 90 nm) against a
+%   compressed half-width of sixteen, a margin of about 3.3 that clears the
+%   guard of Section 4.12. The image is not a loss of deflection. The
 %   zero-frequency bin still satisfies real(Y) = sum(tmpl.^2) exactly, so the
 %   deflection ||s||/sigma is the true matched-filter value with no 3 dB
 %   penalty; the image carries no independent information and combining the
@@ -1837,4 +2382,84 @@ end
 %   a single relative coefficient. Note that the sensitivity to both is far
 %   lower than in the chirped version, since a frequency error no longer
 %   moves the compression peak.
+%
+% NOTE 12 - CORRECTIONS OF THIS VERSION (NewCovertSimFix).
+%   (1) RESOLVABLE ALPHABET. The previous version counted as distinguishable
+%   two pitches whose fringe counts across the WHOLE band differ by one. The
+%   signal, however, lives only under the interference envelope, which
+%   occupies about one thirtieth of the band (N_env of order 570 samples out
+%   of N). Adjacent integer counts give templates correlated at 0.998, and
+%   about thirty counts are needed for two templates to decorrelate. The
+%   number of hypotheses Eve-C really has to spread over is the participation
+%   ratio of the template correlation matrix (function resolvablePitches),
+%   which is what M now denotes everywhere: Eve-C deflection, identification
+%   check, key cost and Fig. 4. The three ceilings still bound the RANGE of
+%   fringe counts and the tracking residual still binds; only the counting
+%   inside that range changes. No keyed scheme can create more than about
+%   N_env independent cells, which is reported as an upper bound.
+%   (2) THRESHOLD READING. A threshold thr on the accumulated deflection
+%   leaves the eavesdropper's optimal test with total error 2Q(thr/2) when the
+%   transmission stops: 0.13 for thr = 3. Volumes at thr = 1 are also reported
+%   at the same operating point.
+%   (3) The stationary control (Section 8.1) and the window scaling (Section
+%   8.2) now use the same adversary as the design target (Eve-C with
+%   hopping); the previous version used Eve-A in both, which mixed criteria.
+%   (4) OD is an rms OPTICAL DEPTH over the band, not a fractional intensity
+%   modulation: the line peaks reach several times OD, while the valley where
+%   the cross term lives is optically thin, so the linear imprint is accurate
+%   there. The cross term amounts to about 1e-4 of the probe intensity, and
+%   about 2e-5 of the peak of the classical line.
+%   (5) Eve-A restricted to the envelope: see Note 13, where it becomes the
+%   nominal model.
+%   (6) Still assumed and not modelled: the residual Doppler RATE after
+%   compensation (eps_kappa is a random calibration error, not derived from
+%   it); per-symbol tracking loss across the alphabet (the Monte Carlo uses
+%   the declared pitch, the loss on the finest pitch is bounded by the
+%   declared budget hopLossTol_dB).
+%
+% NOTE 13 - SECOND REVISION.
+%   (1) Eve-A is now the envelope-weighted energy detector described in
+%   Section 4.9, with N_env cells instead of N. The full-band radiometer never
+%   reached threshold at the corrected operating point and was therefore not
+%   an informative bound; it is still printed as a reference. M_eff is capped
+%   at N_env, since beyond it Eve-C would simply use Eve-A.
+%   (2) The alphabet-scaling check of Section 9.1 no longer expects a slope of
+%   exactly 1/2: it is evaluated at a fixed operating point over strongly
+%   unequal epochs. The square-root law is tested in Section 8.2.
+%
+% NOTE 14 - THIRD REVISION: EVERYTHING INSIDE THE PERIMETER IS COMPUTED.
+%   (1) Residual Doppler RATE. Section 4.8 now computes the residual rate the
+%   compensation may leave for the declared loss budget on the finest pitch
+%   (sinc smearing of the fringe over one symbol). It is a requirement on the
+%   compensation, reported with the fraction of the raw closest-approach rate
+%   that must be removed; no residual rate is declared or simulated.
+%   (2) Hopping inside the Monte Carlo. Campaigns B and 7.1 draw each symbol's
+%   pitch from the resolvable alphabet (cfg.F_alpha), so the simulated BER and
+%   capacity include the tracking loss of fine pitches and the small variation
+%   of template energy across the alphabet. Campaign A keeps the declared pitch
+%   because it validates the receiver against Q(||s||/sigma). The adversaries'
+%   deflections use the alphabet-averaged template energy (g_eve) and do not
+%   include Bob's tracking loss, which is the conservative choice.
+%   (3) Design power. The operating-point optimisation, the stationary control
+%   and the window scaling now use the received power times the pass-mean
+%   pointing loss, so design and Monte Carlo figures refer to the same power.
+%   The identification check is still evaluated on the unfaded power, the
+%   adversary's best case.
+%
+% NOTE 15 - FOURTH REVISION.
+%   (1) Eve-C lower bound. Epochs whose unfaded design deflection exceeds half
+%   the single-symbol identification threshold are counted with Eve-B's
+%   deflection, as if the pitch had been identified there. The covert volume
+%   against Eve-C is then reported as an interval, [lower bound, nominal],
+%   and the identification premise is no longer assumed anywhere.
+%   (2) The noise-model check of Section 4.8 now includes the pass-mean
+%   pointing loss, like the design it verifies; the explanatory printout of
+%   the Eve-C/Eve-A volume ratio has been updated.
+%
+% NOTE 16 - GEOMETRIC ARGUMENT, CONVENTION FIX.
+%   Section 4.11 now uses the half-angle theta_div/2 consistently with the
+%   full-angle convention of Section 3: 1/e^2 radius 1.24 m (diameter 2.47 m)
+%   at closest approach, illuminated fraction of the solid angle 4.0e-12
+%   instead of 1.6e-11. The earlier figures overstated the beam, so they were
+%   conservative for security, but inconsistent with the link budget.
 % =========================================================================
