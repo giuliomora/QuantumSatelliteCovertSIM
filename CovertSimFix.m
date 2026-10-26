@@ -1612,3 +1612,5 @@ function H = binaryEntropy(p)
     p = min(max(p,0),1); H = zeros(size(p)); m = (p>0)&(p<1);
     H(m) = -p(m).*log2(p(m)) - (1-p(m)).*log2(1-p(m));
 end
+
+%test
