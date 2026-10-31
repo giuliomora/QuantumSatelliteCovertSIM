@@ -52,6 +52,9 @@
 %   Phased Array System (fspl)
 %   Signal Processing (findpeaks)
 %
+% FIGURES
+%   Block 9 draws the seven figures of Chapter 6 in their final form.
+%
 % Repository: https://github.com/giuliomora/QuantumSatelliteCovertSIM
 % =========================================================================
 
@@ -1169,16 +1172,34 @@ end
 %% ========================================================================
 % 9. FIGURES
 % =========================================================================
+% Draws the seven figures of Chapter 6 directly in their final form (the
+% former fixFigures.m is merged here). Nothing is saved: export each figure
+% by hand with the file name printed at the end of this block.
+%   Fig 1ab -> Sec. 6.2 (signal and receiver output)
+%   Fig 1c  -> Sec. 6.3 (Campaign A)
+%   Fig 2a  -> Sec. 6.4 (Campaign B)
+%   Fig 2b  -> Sec. 6.5 (cumulative volume, stop of each adversary)
+%   Fig 3a  -> Sec. 6.1 (choice of the packet separation)
+%   Fig 3b  -> Sec. 6.9 (sensitivity to the optical depth)
+%   Fig 4   -> Sec. 6.6 (hopping alphabet)
 f_MHz = cfg.dw/(2*pi)/1e6;
 
+% Time convention for Fig 2b.
+%   'printed'  : epoch k spans [t_ep(k), t_ep(k)+45 s), the convention of
+%                stopEpochTime, so the stop times match the printout and the
+%                text. The last epoch is drawn up to 945 s.
+%   'physical' : epoch k spans its real weight of 900/21 = 42.9 s; the stop
+%                times shift by up to ~20 s.
+timeConv = 'printed';
+
 % -------------------------------------------------------------------------
-% FIG 1: SPECTRAL FRINGE AND MATCHED FILTERING
+% FIG 1ab: SPECTRAL FRINGE AND MATCHED FILTERING
 % -------------------------------------------------------------------------
-figure('Name','Fig 1 Spectral fringe and matched filtering','Color','w','Position',[80 100 1200 380]);
+figure('Name','Fig 1ab Spectral fringe and matched filtering','Color','w','Position',[80 100 900 380]);
 
 % (a) Spectra. The interference term is plotted on its own axis, since it is
 % a small ripple on the classical line.
-subplot(1,3,1);
+subplot(1,2,1);
 plot(f_MHz, sig.S_cl, 'LineWidth', 1.4); hold on;
 plot(f_MHz, S_bit0, 'LineWidth', 0.9);
 yyaxis right;
@@ -1193,8 +1214,8 @@ legend({'S_{classical}','S_{quantum} (bit 0)','difference (right axis)'}, ...
 grid on;
 xlim([-1 1]*lineWidth_Hz/1e6);
 
-% (b) Matched filter response
-subplot(1,3,2);
+% (b) Matched filter response, wide enough to show the image peak.
+subplot(1,2,2);
 uax = (1:cfg.N) - cfg.N/2 - 1;
 Y0_mf = real(fftshift(fft(ifftshift( sig.tmpl.*weight))));
 Y1_mf = real(fftshift(fft(ifftshift(-sig.tmpl.*weight))));
@@ -1206,10 +1227,12 @@ ylabel('Normalized Output');
 title('(b) Compressed Matched Filter Peak');
 legend({'bit 0 (matched)','bit 1 (matched)'}, 'Location', 'best', 'FontSize', 8);
 grid on;
-xlim([-60 60]);
+xlim([-60 max(120, ceil(1.2*imageOffset))]);
 
-% (c) Waterfall, clipped at the resolvable floor 1/(Nbit_frame*N_MC).
-subplot(1,3,3);
+% -------------------------------------------------------------------------
+% FIG 1c: WATERFALL, clipped at the resolvable floor 1/(Nbit_frame*N_MC)
+% -------------------------------------------------------------------------
+figure('Name','Fig 1c Error rate validation','Color','w','Position',[120 120 620 460]);
 BER_floor = 1/(cfg.Nbit_frame*cfg.N_MC);
 bp = BER_A;
 bp(bp==0) = NaN;
@@ -1223,52 +1246,77 @@ xline(min(opt.sigma_ep), 'g--', '\sigma closest', 'LineWidth', 1.1, 'LabelOrient
 xline(max(opt.sigma_ep), 'm--', '\sigma edge', 'LineWidth', 1.1, 'LabelOrientation', 'horizontal');
 xlabel('Relative Noise Floor \sigma');
 ylabel('Raw BER');
-title('(c) Error Rate Validation');
+title('Error Rate Validation');
 legend({'Monte Carlo', 'theoretical filter curve'}, 'Location', 'southeast', 'FontSize', 8);
 grid on;
 
 % -------------------------------------------------------------------------
-% FIG 2: ORBITAL PASS PERFORMANCE
+% FIG 2a: BER AND CAPACITY ALONG THE PASS
 % -------------------------------------------------------------------------
-figure('Name','Fig 2 Orbital pass and eavesdropper accumulation','Color','w','Position',[110 80 900 380]);
-
-% (a) BER and capacity along the pass
-subplot(1,2,1);
+figure('Name','Fig 2a Channel quality over the pass','Color','w','Position',[110 80 620 460]);
 yyaxis left;
-h1 = errorbar(t_ep, BER_B, BER_B-BER_B_lo, BER_B_hi-BER_B, 'o-', 'Color', [0 0.45 0.74], 'LineWidth', 1.3, 'MarkerSize', 4);
+errorbar(t_ep, BER_B, BER_B-BER_B_lo, BER_B_hi-BER_B, 'o-', 'Color', [0 0.45 0.74], 'LineWidth', 1.3, 'MarkerSize', 4);
 ylabel('Raw BER');
 ylim([0 0.55]);
 ax = gca; ax.YColor = [0 0.45 0.74];
-
 yyaxis right;
-h2 = plot(t_ep, C_ep_sim, 's--', 'Color', [0.85 0.33 0.1], 'LineWidth', 1.2, 'MarkerSize', 4);
+plot(t_ep, C_ep_sim, 's--', 'Color', [0.85 0.33 0.1], 'LineWidth', 1.2, 'MarkerSize', 4);
 ylabel('Capacity [bit/symbol]');
 ylim([0 1.05]);
 ax.YColor = [0.85 0.33 0.1];
-
 xline(t_sec(idx_cross), 'k:', 'Closest approach', 'LabelOrientation', 'horizontal');
 xlabel('Time from Pass Start [s]');
-title('(a) Channel Quality Over Fly-By Pass');
-grid on;
-
-% (b) Cumulative volume and covert ceilings (nominal Eve-C only)
-subplot(1,2,2);
-plot(t_ep, bits_cum/1e3, 'k-', 'LineWidth', 1.5); hold on;
-yline(B_covert_A/1e3, 'g--', 'vs Eve-A (envelope energy)', 'LineWidth', 1.2);
-yline(B_covert_C/1e3, 'b-.', 'vs Eve-C (hop-blind)', 'LineWidth', 1.4);
-yline(B_covert_B/1e3, 'r--', 'vs Eve-B (key compromised)', 'LineWidth', 1.2);
-xlabel('Time from Pass Start [s]');
-ylabel('Cumulative Volume [kbit]');
-title('(b) Covert Information Volume');
+title('Channel Quality Over Fly-By Pass');
 grid on;
 
 % -------------------------------------------------------------------------
-% FIG 3: DESIGN OPTIMIZATION AND SENSITIVITY
+% FIG 2b: CUMULATIVE VOLUME AND COVERT CEILINGS
+% The cumulative volume is drawn at the END of each epoch, so the black
+% curve meets each adversary line exactly at its stop time.
 % -------------------------------------------------------------------------
-figure('Name','Fig 3 Design optimisation and sensitivities','Color','w','Position',[140 60 900 420]);
+figure('Name','Fig 2b Covert information volume','Color','w','Position',[140 100 620 460]);
+ax = gca; hold(ax, 'on');
+switch timeConv
+    case 'printed',  dtE = t_ep(2) - t_ep(1);       % 45 s
+    case 'physical', dtE = T_window/N_epochs;       % 42.9 s
+end
+tEdge = (0:N_epochs)*dtE;                    % start of epoch 1 ... end of epoch 21
+cumE  = [0, bits_cum]/1e3;                   % bits are uniform inside an epoch
+plot(ax, tEdge, cumE, 'k-', 'LineWidth', 1.5, 'DisplayName', 'no eavesdropper');
+vols   = [B_covert_A, B_covert_C, B_covert_B]/1e3;
+kStop  = [isA, isC, isB];
+tStopP = [tsA, tsC, tsB];
+names  = {'vs Eve-A (envelope energy)', 'vs Eve-C (hop-blind)', 'vs Eve-B (key compromised)'};
+cols   = {[0.47 0.67 0.19], [0 0.45 0.74], [0.85 0.33 0.10]};
+styles = {'--', '-.', '--'};
+for i = 1:3
+    yline(ax, vols(i), styles{i}, 'Color', cols{i}, 'LineWidth', 1.3, 'DisplayName', names{i});
+    if isnan(tStopP(i)), continue; end       % threshold never reached
+    k = kStop(i);
+    % Fraction of the crossing epoch already transmitted at the stop: the
+    % same fraction volumeAtThreshold uses (D^2 and bits linear in symbols).
+    if k < N_epochs, span = t_ep(k+1) - t_ep(k); else, span = t_ep(k) - t_ep(k-1); end
+    frac = (tStopP(i) - t_ep(k))/span;
+    tS   = (k - 1 + frac)*dtE;
+    plot(ax, [tS tS], [0 vols(i)], ':', 'Color', cols{i}, 'LineWidth', 1.1, 'HandleVisibility', 'off');
+    plot(ax, tS, vols(i), 'o', 'MarkerSize', 6, 'MarkerFaceColor', cols{i}, ...
+         'MarkerEdgeColor', 'k', 'HandleVisibility', 'off');
+    text(ax, tS + 12, vols(i), sprintf('%.0f s', tS), 'Color', cols{i}, ...
+         'FontSize', 8, 'VerticalAlignment', 'bottom');
+end
+xline(ax, t_sec(idx_cross), 'k:', 'Closest approach', ...
+      'LabelOrientation', 'horizontal', 'HandleVisibility', 'off');
+xlim(ax, [0 tEdge(end)]);  ylim(ax, [0 1.1*max(cumE)]);
+xlabel(ax, 'Time from Pass Start [s]');
+ylabel(ax, 'Cumulative Volume [kbit]');
+title(ax, 'Covert Information Volume');
+legend(ax, 'Location', 'northwest', 'FontSize', 7.5);
+grid(ax, 'on');  hold(ax, 'off');
 
-% (a) Operating point sweep
-subplot(1,2,1);
+% -------------------------------------------------------------------------
+% FIG 3a: OPERATING POINT SWEEP
+% -------------------------------------------------------------------------
+figure('Name','Fig 3a Operating point optimisation','Color','w','Position',[150 110 620 460]);
 semilogy(sep_vec, max(B_noEve,1e-3), '--', 'LineWidth', 1.2); hold on;
 semilogy(sep_vec, max(B_naive,1e-3), 'LineWidth', 1.2);
 semilogy(sep_vec, max(B_hop,1e-3), 'LineWidth', 1.6);
@@ -1276,21 +1324,37 @@ semilogy(sep_vec, max(B_keyed,1e-3), 'LineWidth', 1.2);
 xline(cfg.sep_over_Delta, 'k:', 'optimum', 'LineWidth', 1.2);
 xlabel('Wavepacket Separation [\Delta_p]');
 ylabel('Pass Volume [bit]');
-title('(a) Operating Point Optimization');
+title('Operating Point Optimization');
 legend({'no eavesdropper', 'vs Eve-A', 'vs Eve-C (hop-blind)', 'vs Eve-B'}, ...
        'Location', 'southoutside', 'Orientation', 'horizontal', 'FontSize', 7);
 grid on;
 
-% (b) Imprint depth sensitivity
-subplot(1,2,2);
-OD_fine = logspace(log10(cfg.OD/20), log10(cfg.OD*8), 200);
+% -------------------------------------------------------------------------
+% FIG 3b: IMPRINT DEPTH SENSITIVITY, valid range (OD <= 1) highlighted
+% -------------------------------------------------------------------------
+figure('Name','Fig 3b Imprint depth sensitivity','Color','w','Position',[160 120 620 460]);
+ax = gca; hold(ax, 'on');
+OD_fine = logspace(log10(cfg.OD/20), log10(cfg.OD*8), 300);
 d_fine  = (OD_fine/cfg.OD)*(g_mf/sigma_ref);
-semilogx(OD_fine, 1-binaryEntropy(0.5*erfc(d_fine/sqrt(2))), 'LineWidth', 1.5); hold on;
-xline(cfg.OD, 'k:', 'declared', 'LineWidth', 1.2);
-xlabel('Imprint Depth [OD]');
-ylabel('Capacity [bit/symbol]');
-title('(b) Imprint Depth Sensitivity');
-grid on;
+C_fine  = 1 - binaryEntropy(0.5*erfc(d_fine/sqrt(2)));
+inR     = OD_fine <= 1;
+patch(ax, [1 max(OD_fine) max(OD_fine) 1], [0 0 1 1], [0.9 0.9 0.9], ...
+      'EdgeColor', 'none', 'HandleVisibility', 'off');
+plot(ax, OD_fine(inR),  C_fine(inR),  '-',  'Color', [0 0.45 0.74], 'LineWidth', 1.6, ...
+     'DisplayName', 'linear imprint (OD \leq 1)');
+plot(ax, OD_fine(~inR), C_fine(~inR), '--', 'Color', [0 0.45 0.74], 'LineWidth', 1.2, ...
+     'DisplayName', 'extrapolation');
+d_dec = g_mf/sigma_ref;
+plot(ax, cfg.OD, 1 - binaryEntropy(0.5*erfc(d_dec/sqrt(2))), 'ko', 'MarkerFaceColor', 'k', ...
+     'HandleVisibility', 'off');
+xline(ax, cfg.OD, 'k:', 'declared', 'LineWidth', 1.2, 'HandleVisibility', 'off');
+set(ax, 'XScale', 'log', 'Layer', 'top');
+xlim(ax, [min(OD_fine) max(OD_fine)]);  ylim(ax, [0 1]);
+xlabel(ax, 'Imprint Depth [OD]');
+ylabel(ax, 'Capacity [bit/symbol]');
+title(ax, 'Imprint Depth Sensitivity');
+legend(ax, 'Location', 'northwest', 'FontSize', 7.5);
+grid(ax, 'on');  hold(ax, 'off');
 
 % -------------------------------------------------------------------------
 % FIG 4: HOPPING ALPHABET AND ITS CEILINGS
@@ -1313,6 +1377,13 @@ ref = max(B_vec(1),eps)*sqrt(M_vec/M_vec(1));
 loglog(M_vec, ref, 'k:', 'LineWidth', 1.1);
 xline(max(opt.M_eff,1), 'b-.', 'M resolvable', 'LineWidth', 1.3, 'LabelOrientation', 'horizontal');
 xline(opt.N_env, 'g--', 'Eve-A (M = N_{env})', 'LineWidth', 1.1, 'LabelOrientation', 'horizontal');
+% Marker at the alphabet allowed by the sampling bound alone.
+if cfg.hopping
+    B_nyq = 10^interp1(log10(M_vec), log10(max(B_vec,eps)), log10(Mres_nyq));
+    plot(Mres_nyq, B_nyq, 'kd', 'MarkerFaceColor', [0.85 0.33 0.10], 'HandleVisibility', 'off');
+    text(Mres_nyq, B_nyq, sprintf('  \\sigma_f = %.0f Hz', cfg.sigma_f_track*opt.F_trk/opt.F_nyq), ...
+         'FontSize', 8, 'VerticalAlignment', 'top', 'HorizontalAlignment', 'right');
+end
 xlabel('Resolvable Alphabet M [independent pitches]');
 ylabel('Covert Volume vs Eve-C [bit]');
 title('(a) Covert Volume Bought with Alphabet Size');
@@ -1336,6 +1407,10 @@ if sum(useFit) >= 5
 else
     fprintf('\n--- 9.1 Hopping alphabet scaling: too few unsaturated points to fit ---\n');
 end
+if cfg.hopping
+    fprintf('  volume vs Eve-C read at the sampling-limited alphabet M = %.1f -> %.2f kbit (fixed operating point)\n', ...
+            Mres_nyq, B_nyq/1e3);
+end
 
 % (b) Alphabet ceiling versus Doppler tracking residual.
 subplot(1,2,2);
@@ -1351,8 +1426,17 @@ ylabel('Resolvable Alphabet M');
 title(sprintf('(b) Alphabet Ceiling (budget %.1f dB)', cfg.hopLossTol_dB));
 grid on;
 
-fprintf('\n--- SIMULATION COMPLETE ---\n');
+% --- File names for export ------------------------------------------------
+figNames = {'Fig 1ab Spectral fringe and matched filtering', 'Fig 1c Error rate validation', ...
+            'Fig 2a Channel quality over the pass', 'Fig 2b Covert information volume', ...
+            'Fig 3a Operating point optimisation', 'Fig 3b Imprint depth sensitivity', ...
+            'Fig 4 Hopping alphabet'};
+fprintf('\nFigures to export:\n');
+for i = 1:numel(figNames)
+    fprintf('  %s  ->  %s.pdf\n', figNames{i}, strrep(figNames{i}, ' ', '_'));
+end
 
+fprintf('\n--- SIMULATION COMPLETE ---\n');
 %% ========================================================================
 % LOCAL FUNCTIONS
 % =========================================================================
@@ -1612,5 +1696,3 @@ function H = binaryEntropy(p)
     p = min(max(p,0),1); H = zeros(size(p)); m = (p>0)&(p<1);
     H(m) = -p(m).*log2(p(m)) - (1-p(m)).*log2(1-p(m));
 end
-
-%test
