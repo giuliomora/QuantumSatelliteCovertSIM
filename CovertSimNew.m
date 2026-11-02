@@ -53,7 +53,8 @@
 %   Signal Processing (findpeaks)
 %
 % FIGURES
-%   Block 9 draws the seven figures of Chapter 6 in their final form.
+%   Block 9 draws the seven figures of Chapter 6 in their final form, and
+%   the symbol figure of Chapter 3 (ch3_spectrum).
 %
 % Repository: https://github.com/giuliomora/QuantumSatelliteCovertSIM
 % =========================================================================
@@ -1535,7 +1536,8 @@ end
 %% ========================================================================
 % 9. FIGURES
 % =========================================================================
-% Draws the seven figures of Chapter 6 directly in their final form (the
+% Draws the seven figures of Chapter 6 and the symbol figure of Chapter 3
+% directly in their final form (the
 % former fixFigures.m is merged here). Nothing is saved: export each figure
 % by hand with the file name printed at the end of this block.
 %   Fig 1ab -> Sec. 6.2 (signal and receiver output)
@@ -1543,8 +1545,9 @@ end
 %   Fig 2a  -> Sec. 6.4 (Campaign B)
 %   Fig 2b  -> Sec. 6.5 (cumulative volume, stop of each adversary)
 %   Fig 3a  -> Sec. 6.1 (choice of the packet separation)
-%   Fig 3b  -> Sec. 6.9 (sensitivity to the optical depth)
+%   Fig 3b  -> Sec. 6.8 (sensitivity to the optical depth)
 %   Fig 4   -> Sec. 6.6 (hopping alphabet)
+%   ch3_spectrum -> Sec. 3.4 (transmitted symbol: S_cl and +-g)
 f_MHz = cfg.dw/(2*pi)/1e6;
 
 % Time convention for Fig 2b.
@@ -1806,11 +1809,33 @@ ylabel('Resolvable Alphabet M');
 title(sprintf('(b) Alphabet Ceiling (budget %.1f dB)', cfg.hopLossTol_dB));
 grid on;
 
+% -------------------------------------------------------------------------
+% CH3_SPECTRUM: TRANSMITTED SYMBOL AT THE OPERATING POINT (Chapter 3)
+% (a) classical profile S_cl; (b) signed pulse +-g on its own scale, with the
+% envelope. Symmetric axes, wide enough to hold the whole structure.
+% -------------------------------------------------------------------------
+g_sym = sig.I_env.*cos(cfg.Phi);                       % pulse, bit 0
+xl_sp = [-1 1]*ceil(max(abs(f_MHz(sig.S_cl > 1e-3*max(sig.S_cl)))));
+figure('Name','ch3_spectrum','Color','w','Position',[100 100 900 340]);
+subplot(1,2,1);
+plot(f_MHz, sig.S_cl, 'k-', 'LineWidth', 1.4);
+xlim(xl_sp); grid on;
+xlabel('Detuning [MHz]'); ylabel('Optical depth');
+title('(a) Classical profile S_{cl}');
+subplot(1,2,2);
+plot(f_MHz,  g_sym, 'b-',  'LineWidth', 1.3); hold on;
+plot(f_MHz, -g_sym, 'r--', 'LineWidth', 1.3);
+plot(f_MHz,  sig.I_env, 'k:', f_MHz, -sig.I_env, 'k:', 'LineWidth', 0.9);
+xlim(xl_sp); grid on;
+xlabel('Detuning [MHz]'); ylabel('Optical depth');
+title('(b) Interference term');
+legend({'bit 0','bit 1','envelope \pm I_{env}'}, 'Location','northeast', 'FontSize', 8);
+
 % --- File names for export ------------------------------------------------
 figNames = {'Fig 1ab Spectral fringe and matched filtering', 'Fig 1c Error rate validation', ...
             'Fig 2a Channel quality over the pass', 'Fig 2b Covert information volume', ...
             'Fig 3a Operating point optimisation', 'Fig 3b Imprint depth sensitivity', ...
-            'Fig 4 Hopping alphabet'};
+            'Fig 4 Hopping alphabet', 'ch3_spectrum'};
 fprintf('\nFigures to export:\n');
 for i = 1:numel(figNames)
     fprintf('  %s  ->  %s.pdf\n', figNames{i}, strrep(figNames{i}, ' ', '_'));
@@ -2155,4 +2180,4 @@ end
 function H = binaryEntropy(p)
     p = min(max(p,0),1); H = zeros(size(p)); m = (p>0)&(p<1);
     H(m) = -p(m).*log2(p(m)) - (1-p(m)).*log2(1-p(m));
-end
+end 
