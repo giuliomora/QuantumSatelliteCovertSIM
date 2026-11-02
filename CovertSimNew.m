@@ -193,12 +193,12 @@ end
 % 3. FREE-SPACE OPTICAL LINK BUDGET
 % =========================================================================
 % The beam is expanded to theta_div = 8 urad (diffraction limit of the
-% 0.20 m aperture: 1.7 urad) to tolerate 1.5 urad of pointing jitter; the
+% 0.30 m aperture: 1.1 urad) to tolerate 1.5 urad of pointing jitter; the
 % transmit gain is that of the expanded beam. theta_div is the FULL 1/e^2
 % divergence, so G = 8/(theta_div/2)^2. Pointing jitter is applied
 % independently at both terminals.
 fprintf('\n=== 3. OPTICAL LINK BUDGET ===\n');
-D_tx = 0.20; D_rx = 0.30; P_tx = 100e-3;
+D_tx = 0.30; D_rx = 0.30; P_tx = 20e-3;
 eta_tx = 0.85; eta_rx = 0.80; eta_det = 0.65; rho_ap = 0.65;
 sigma_jit_pat = 1.5e-6; theta_div = 8.0e-6;
 
@@ -1685,7 +1685,7 @@ semilogy(sep_vec, max(B_naive,1e-3), 'LineWidth', 1.2);
 semilogy(sep_vec, max(B_hop,1e-3), 'LineWidth', 1.6);
 semilogy(sep_vec, max(B_keyed,1e-3), 'LineWidth', 1.2);
 xline(cfg.sep_over_Delta, 'k:', 'optimum', 'LineWidth', 1.2);
-xlabel('Wavepacket Separation [\Delta_p]');
+xlabel('Packet Separation s [\Delta]');
 ylabel('Pass Volume [bit]');
 title('Operating Point Optimization');
 legend({'no eavesdropper', 'vs Eve-A', 'vs Eve-C (hop-blind)', 'vs Eve-B'}, ...
