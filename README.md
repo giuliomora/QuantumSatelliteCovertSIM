@@ -1,81 +1,73 @@
-# Quantum Doppler Covert Inter-Satellite Link Simulator
+# QuantumSatelliteCovertSIM
 
-MATLAB simulator for the Master's thesis *Feasibility Study of a Quantum Doppler Effect-Based Channel for Covert Inter-Satellite Communications* (Computer Science, Università di Padova, A.Y. 2025–2026).
+Simulator of a covert optical link between two LEO satellites based on the quantum Doppler effect.
 
-The simulator estimates how much information two satellites in low Earth orbit can exchange over one pass before an eavesdropper notices that a transmission is taking place (the *covert volume*).
+Code of the master thesis *Feasibility Study of a Quantum Doppler Effect-Based Channel for Covert Inter-Satellite Communications*, Giulio Morandini, Università degli Studi di Padova, 2026.
 
-Each bit is the sign of a spectral fringe written on the quantum Doppler signature of a ²⁷Al⁺ emitter: a superposition of two momentum packets whose relative phase (0 or π) carries the bit, and whose spatial displacement Δx turns the interference term into a regular fringe. The fringe is imprinted on a laser probe and read by a matched-filter receiver. Its pitch changes at every symbol under a shared key (*fringe hopping*), so an eavesdropper who knows the scheme but not the key cannot use a single filter.
+## What it does
 
-## What it simulates
+The bit is written in the sign of a spectral fringe produced by an atomic superposition of two momentum packets and carried by a laser probe across a LEO–LEO fly-by. The program follows the whole chain:
 
-The script runs nine blocks in sequence:
+- orbital geometry of a cross-plane pass (SGP4) and classical Doppler shift;
+- free-space optical link budget with pointing loss;
+- spectrum of the symbol, fringe hopping driven by a key, matched-filter receiver;
+- Bob's error rate by Monte Carlo (Campaign A: validation against theory; Campaign B: along the pass);
+- three adversaries (Eve-A energy detector, Eve-B scheme-aware without the key, Eve-C with the key) and the covert volume each one allows before detection;
+- sensitivity analyses, control cases and the figures of the thesis.
 
-| Block | Content |
-|---|---|
-| 1 | Physical constants |
-| 2 | Orbital geometry: a cross-plane pass (800 km, planes 60° apart, closest approach about 300 km) propagated with SGP4; distance, classical Doppler shift, line-of-sight and solar-exclusion constraints |
-| 3 | Optical link budget, with pointing loss at both terminals |
-| 4 | Symbol spectrum, choice of the operating point that maximises the covert volume, hopping alphabet, adversary models and run-time checks |
-| 5 | Campaign A: simulated bit-error rate against the theoretical curve |
-| 6 | Campaign B: bit-error rate along the pass, with pointing fades, Doppler residual and calibration errors |
-| 7 | Sensitivity to the declared inputs: calibration errors, optical depth, branch displacement |
-| 8 | Capacity and covert volume against three eavesdroppers, on a grid of detection thresholds, and a final summary |
-| 9 | The seven figures of the results chapter of the thesis |
-
-The three eavesdroppers are:
-
-- **Eve-A**: energy detector, knows neither the scheme nor the key;
-- **Eve-B**: knows the key (key-compromise case);
-- **Eve-C**: knows the scheme but not the key; the reference adversary when hopping is on.
-
-## What it does not simulate
-
-- **The atomic source:** described by three declared inputs (packet width Δ, displacement Δx, optical depth OD); its preparation and coherence are assumed.
-- **The Doppler compensation:** the classical shift is computed but assumed removed; only the residual offset is simulated.
-- **The cipher:** the keyed pitch sequence is not generated; each pitch is drawn uniformly among the admissible ones, as a secure cipher looks to anyone without the key.
-- **The channel code:** each symbol carries its capacity.
-
-The full list of assumptions and parameters is in the appendices of the thesis.
 
 ## Requirements
 
-- MATLAB R2021a or later
-- Satellite Communications Toolbox (`satelliteScenario`, SGP4 propagation)
+MATLAB with:
+
+- Satellite Communications Toolbox (`satelliteScenario`, `satellite`, `states`)
 - Phased Array System Toolbox (`fspl`)
 - Signal Processing Toolbox (`findpeaks`)
 
-## Usage
+## Files
 
-Run the script from MATLAB:
+| File | Content |
+|---|---|
+| `CovertSimFix.m` | Main script: the reference run (seed 42) and all the figures of the thesis |
+| `runSeed.m` | The part of `CovertSimFix.m` that produces the covert volumes, as a function of the seed |
+| `seedStudy.m` | Variability study over seeds 1–30; writes `seedStudy.mat` |
+
+## How to run
+
+**Reference run.** Put all the files in one folder and run
 
 ```matlab
-CovertSimNew
+CovertSimFix
 ```
 
-All results are printed to the console, block by block; the summary at the end of block 8 collects the final figures. Block 9 opens the figures but does not save them: the file name for each is printed at the end of the run.
+The results are printed block by block in the command window; the figures are drawn but not saved, and the names to export them with are printed at the end of block 9.
 
-Main switches (block 4):
+**Variability over seeds.** Run
 
-| Setting | Default | Effect |
-|---|---|---|
-| `cfg.hopping` | `true` | `false` gives the fixed-pitch scheme, for comparison |
-| `cfg.fastMC` | `true` | `false` runs the full spectral Monte Carlo instead of the sufficient-statistic path (much slower; used as a check) |
-| `cfg.profileFit` | `true` | `false` removes Bob's per-frame estimation of the classical profile |
+```matlab
+seedStudy
+```
+
+It first checks that `runSeed(42)` reproduces the reference run and stops if it does not; it then runs seeds 1–30, prints mean, standard deviation and range of every result, and saves `seedStudy.mat`. If `seedStudy.mat` is in the same folder, a later run of `CovertSimFix` adds the variability bands to Fig 2b.
+
+## Switches
+
+Set in block 4 of `CovertSimFix.m`:
+
+- `cfg.hopping = false`: fixed-pitch baseline, without fringe hopping;
+- `cfg.fastMC = false`: full spectral Monte Carlo instead of the sufficient-statistic shortcut (much slower; used in the thesis as a check);
+- `cfg.profileFit = false`: receiver without the per-frame estimation of the classical profile.
 
 ## Reproducibility
 
-Every random number comes from a single seed (`SEED_MASTER = 42`), and each Monte Carlo campaign, point and realisation uses its own random substream: the same seed gives the same results, and each run can be repeated on its own.
+Every random number comes from the master seed `SEED_MASTER = 42`, through independent streams for each campaign, point and trial.
 
-With the default settings, the summary gives a covert volume against Eve-C of about 4.3 kbit at the detection threshold D = 3, and about 1.4 kbit at D = 1.
+## Physical basis
 
-## Physical model
+P. T. Grochowski, A. R. H. Smith, A. Dragan, K. Dębski, "Quantum time dilation in atomic spectra", *Physical Review Research* 3, 023053 (2021). Equation numbers quoted in the code refer to that work.
 
-The quantum Doppler signature is taken from:
+## Citation
 
-P. T. Grochowski, A. R. H. Smith, A. Dragan, K. Dębski, "Quantum time dilation in atomic spectra", *Phys. Rev. Research* 3, 023053 (2021).
+If you use this code, please cite the thesis and the archived version:
 
-The spatial displacement between the branches, the fringe hopping and the covert-communication analysis are added in this work.
-
-## Author
-
-Giulio Morandini — Università di Padova
+> G. Morandini, *QuantumSatelliteCovertSIM*, version 1.0, 2026.
